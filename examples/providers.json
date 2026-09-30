@@ -1,0 +1,37 @@
+{
+  "default": "go-personal",
+  "providers": [
+    {
+      "id": "go-personal",
+      "kind": "opencode-go",
+      "model": "glm-5.1",
+      "api_key_env": "OPENCODE_GO_PERSONAL_API_KEY"
+    },
+    {
+      "id": "go-work",
+      "kind": "opencode-go",
+      "model": "glm-5.1",
+      "api_key_env": "OPENCODE_GO_WORK_API_KEY"
+    },
+    {
+      "id": "zen-work",
+      "kind": "opencode-zen",
+      "api": "responses",
+      "model": "gpt-5.3-codex",
+      "api_key_env": "OPENCODE_ZEN_WORK_API_KEY"
+    },
+    {
+      "id": "codex-api-example",
+      "kind": "codex-api",
+      "model": "gpt-5.4-mini",
+      "api_key_env": "OPENAI_API_KEY"
+    },
+    {
+      "id": "codex-cli-example",
+      "kind": "codex-cli",
+      "model": "gpt-5.4-mini",
+      "command": "codex",
+      "codex_home": "/path/to/codex-account"
+    }
+  ]
+}

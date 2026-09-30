@@ -1,0 +1,11 @@
+{
+  "default": "go-work",
+  "providers": [
+    {
+      "id": "go-work",
+      "kind": "opencode-go",
+      "model": "glm-5.1",
+      "api_key_env": "OPENCODE_GO_WORK_API_KEY"
+    }
+  ]
+}

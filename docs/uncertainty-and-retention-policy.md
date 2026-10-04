@@ -155,7 +155,11 @@ are `-retained-connections` and `-retained-connections-total`.
 At startup, pre-dispatch run reservations are reclaimed under exclusive
 directory ownership. The running-row transition consumes its reservation
 atomically before dispatch, so a surviving reservation cannot represent a
-running provider operation. Pending remote-session creation evidence is kept.
+running provider operation. Pending remote-session creation evidence is kept. Session mapping and consumption
+of its creation reservation commit in one batch, so one admitted session never
+occupies both records after a successful transition. Failed run admission clears
+its exact pre-dispatch reservation on a detached bounded context, including when
+the reservation committed but its acknowledgement was lost.
 
 This is bounded logical retention. It is not a physical disk quota. WAL,
 indexes, checkpointing, available filesystem space, and external provider
@@ -211,8 +215,9 @@ operation is still unresolved:
 - `creating` — a create may have produced a session that was never mapped. The
   intent carries an unguessable ownership token; the next request looks the
   session up by title and **adopts** it rather than creating a duplicate.
-- `cleanup` — a delete was issued for `remote_id` and its outcome is unknown.
-  The next request retries the delete by that known id. A session in this phase
+- `cleanup` — the remote ID is recorded before a delete is issued; its outcome
+  can be unknown.
+  The next request or explicit `Recover` retries the delete by that known id. A session in this phase
   is never returned to the adoption pool, because a late delete must not
   destroy a mapped conversation.
 
@@ -224,8 +229,16 @@ duplicate the very conversation the intent exists to recover. Several sessions
 sharing one token are ambiguous; recovery fails closed and deletes nothing,
 because a title match does not identify which candidate the intent owns.
 
-An intent that survives a committed mapping is stale and is cleared on the next
-request, so recovery can never adopt the session that mapping already owns.
+A new mapping consumes its creation intent atomically. A legacy stale intent
+that survives a committed mapping is cleared after an authoritative mapping
+lookup. An unreadable lookup preserves both the intent and remote session.
+
+Explicit `Recover` also settles existing creation and cleanup intents without
+allocating a run slot or sending a prompt. It can adopt one uniquely matching
+owned session into its reserved mapping slot, or confirm cleanup of an unreferenced
+known remote ID. Full or lowered admission limits do not block this settlement.
+An empty or ambiguous lookup remains uncertain; recovery never creates a
+replacement session or resolves consequential tool effects.
 
 **Concurrency boundary.** `Runtime.Run` holds the session lifecycle lock for
 the whole of create, adoption, mapping, and cleanup, so those phases are

@@ -87,10 +87,10 @@ WHERE (SELECT COUNT(*) FROM runs WHERE workspace=?) + (SELECT COUNT(*) FROM capa
 	return err
 }
 
-func (r *Runtime) releaseRunReservation(req Request) {
+func (r *Runtime) releaseRunReservation(req Request) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `DELETE FROM capacity_run_reservations WHERE workspace=? AND request_id=?`, Args: []any{req.WorkspaceID, req.RequestID}}})
+	return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `DELETE FROM capacity_run_reservations WHERE workspace=? AND request_id=?`, Args: []any{req.WorkspaceID, req.RequestID}}})
 }
 
 func (r *Runtime) startRun(ctx context.Context, req Request, hash string) error {
@@ -105,7 +105,12 @@ func (r *Runtime) startRun(ctx context.Context, req Request, hash string) error 
 func (r *Runtime) insertSession(ctx context.Context, req Request, id string, pending bool) error {
 	if pending {
 		// The intent already reserved this mapping slot before any remote create.
-		return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO sessions(workspace,session_key,backend,directory,profile,session_id) VALUES(?,?,?,?,?,?)`, Args: []any{req.WorkspaceID, req.SessionKey, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, id}, ExpectedRowsAffected: one()}})
+		// Consume it with the mapping. A later cleanup failure must not leave both
+		// records claiming one session slot, and a failed mapping keeps the intent.
+		return r.mutate(ctx, []rhiza.SQLStatement{
+			{SQL: `INSERT INTO sessions(workspace,session_key,backend,directory,profile,session_id) VALUES(?,?,?,?,?,?)`, Args: []any{req.WorkspaceID, req.SessionKey, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, id}, ExpectedRowsAffected: one()},
+			{SQL: `DELETE FROM pending_session_creates WHERE workspace=? AND session_key=? AND phase=?`, Args: []any{req.WorkspaceID, req.SessionKey, pendingPhaseCreating}, ExpectedRowsAffected: one()},
+		})
 	}
 	sql := `INSERT INTO sessions(workspace,session_key,backend,directory,profile,session_id)
 SELECT ?,?,?,?,?,?

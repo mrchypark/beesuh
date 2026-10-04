@@ -109,7 +109,7 @@ type sessionLock struct {
 // Runtime owns its Rhiza directory exclusively. All clients of its OpenCode
 // sessions must go through this instance for the concurrency limits to hold.
 type Runtime struct {
-	db      *rhiza.DB
+	db      runtimeDB
 	client  *opencode.Client
 	native  *nativeEngine
 	opts    Options
@@ -132,6 +132,14 @@ type Runtime struct {
 	mu       sync.Mutex
 	locks    map[string]*sessionLock
 	capacity CapacityLimits
+}
+
+// runtimeDB keeps production on Rhiza while allowing deterministic storage
+// acknowledgement-loss tests around the narrow persistence boundary.
+type runtimeDB interface {
+	Close() error
+	Execute(context.Context, rhiza.ExecuteRequest) (rhiza.ExecuteResponse, error)
+	Query(context.Context, rhiza.QueryRequest) (rhiza.QueryResponse, error)
 }
 
 func Open(ctx context.Context, opts Options) (*Runtime, error) {
@@ -383,12 +391,19 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	if err := r.reserveRun(ctx, req); err != nil {
+		// A storage failure can be reported after this pre-dispatch reservation
+		// committed. This request lock excludes a live sibling with these keys.
+		if cleanupErr := r.releaseRunReservation(req); cleanupErr != nil {
+			return Result{}, errors.Join(err, cleanupErr)
+		}
 		return Result{}, err
 	}
 	reserved := true
 	defer func() {
 		if reserved {
-			r.releaseRunReservation(req)
+			if err := r.releaseRunReservation(req); err != nil {
+				slog.Error("beesuh: releasing failed run admission reservation", "workspace", req.WorkspaceID, "request", req.RequestID, "error", err)
+			}
 		}
 	}()
 	sessionID, err := r.session(ctx, req)
@@ -396,8 +411,8 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	// Persist the uncertain interval before sending anything to the agent.
-	// The two statements form one atomic batch. A failure therefore leaves either
-	// both effects committed (a running row plus active_request, which Recover
+	// The statements form one atomic batch. A failure therefore leaves either
+	// the running row plus active_request committed, which Recover
 	// discovers) or neither, with no external dispatch to reconcile. Installing a
 	// run fence here would strand the workspace with no evidence to lift it.
 	err = r.startRun(ctx, req, hash)
@@ -638,10 +653,14 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			// Another writer, or this runtime's own committed write, already owns
 			// the session. Releasing it would delete live conversation history.
 			slog.Error("beesuh: session mapping insert failed but the session is referenced; preserving it", "session", id, "mapped", mapped)
-			if clearErr := r.clearPendingCreate(req); clearErr != nil {
-				slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
-			}
+			// A committed pending mapping consumes its intent in the same mutation.
 			return mapped, err
+		}
+		// Persist the cleanup phase before the first DELETE. A crash after the
+		// remote call but before this write would otherwise let a resumed
+		// creating intent adopt a session whose delete is still in flight.
+		if markErr := r.markPendingCreateCleanup(ctx, req, id); markErr != nil {
+			return "", errors.Join(err, ErrUncertain, markErr)
 		}
 		// The reclaim must not inherit a cancelled or expired request context,
 		// because a cancelled request is itself a common cause of the mapping
@@ -656,20 +675,11 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			// destroyed later. Record that uncertainty against the intent and keep
 			// it: clearing would discard the only evidence, let the next request
 			// create a fresh session, and strand this one permanently.
-			if markErr := r.markPendingCreateCleanup(ctx, req, id); markErr != nil {
-				slog.Error("beesuh: recording an unresolved session cleanup failed", "session_key", req.SessionKey, "error", markErr)
-			}
 			return "", err
 		}
 		// The remote session is released or gone, so the intent that could adopt
 		// it must not survive. Leaving it would let a later create for the same
 		// session key match a stale title and adopt an unrelated session.
-		if clearErr := r.clearPendingCreate(req); clearErr != nil {
-			slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
-		}
-	} else if err == nil && r.native == nil {
-		// The mapping is durable, so ownership is settled and the intent is no
-		// longer a recovery candidate.
 		if clearErr := r.clearPendingCreate(req); clearErr != nil {
 			slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
 		}
@@ -686,8 +696,9 @@ const (
 	// pendingPhaseCreating means a create may have produced a session whose
 	// local mapping was never written.
 	pendingPhaseCreating = "creating"
-	// pendingPhaseCleanup means a delete was issued for remote_id and its
-	// outcome is unknown, so the session may still be destroyed.
+	// pendingPhaseCleanup identifies a reserved delete for remote_id whose
+	// outcome may become unknown. It is persisted before the first DELETE so a
+	// restart never adopts a session whose delete can still be in flight.
 	pendingPhaseCleanup = "cleanup"
 )
 
@@ -835,10 +846,10 @@ func (r *Runtime) sessionUntracked(ctx context.Context, req Request, id string) 
 	return "", false
 }
 
-// markPendingCreateCleanup records that a delete was issued for remote_id and
-// its outcome is unknown. The intent is kept so a later request can finish the
-// delete; clearing it here would return the runtime to the original untracked
-// orphan failure.
+// markPendingCreateCleanup records the remote ID before a DELETE is issued.
+// The intent is kept so a later request can finish a lost or failed delete;
+// clearing it here would return the runtime to the original untracked orphan
+// failure.
 //
 // The update is conditional on the phase it expects, and the affected row
 // count is verified. Storage can report success for a statement that matched
@@ -874,9 +885,8 @@ func (r *Runtime) reclaimPendingSession(ctx context.Context, req Request, remote
 	deleteErr := r.client.DeleteSession(reclaimCtx, remoteID)
 	cancel()
 	if deleteErr != nil {
-		if markErr := r.markPendingCreateCleanup(ctx, req, remoteID); markErr != nil {
-			slog.Error("beesuh: recording an unresolved session cleanup failed", "session_key", req.SessionKey, "error", markErr)
-		}
+		// The cleanup intent already records this target before the DELETE.
+		// Leave it intact for the next explicit recovery attempt.
 		return false, errors.Join(ErrUncertain, deleteErr)
 	}
 	// The delete was confirmed, so the session is gone and the intent that could
@@ -887,8 +897,9 @@ func (r *Runtime) reclaimPendingSession(ctx context.Context, req Request, remote
 	return true, nil
 }
 
-// Recover explicitly aborts unresolved sessions and records interrupted results.
-// It never retries their tools or claims that their external effects rolled back.
+// Recover explicitly aborts unresolved runs and settles admitted session creates
+// or cleanup without admitting a new run. It never retries tools or claims that
+// their external effects rolled back.
 func (r *Runtime) Recover(ctx context.Context) error {
 	if err := rejectResolverReentry(ctx); err != nil {
 		return err
@@ -954,7 +965,7 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	if unresolved {
 		return errors.Join(ErrUncertain, errors.New("beesuh: running work remains without a recoverable session"))
 	}
-	return nil
+	return r.recoverSessionCreates(ctx)
 }
 
 // clearCompletedRunFence requires the caller to hold life exclusively. A failed

@@ -241,7 +241,11 @@ func (c *Client) Complete(ctx context.Context, in Request) (Response, error) {
 			Message      Message `json:"message"`
 			FinishReason string  `json:"finish_reason"`
 		} `json:"choices"`
-		Usage Usage `json:"usage"`
+		Usage *struct {
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+			TotalTokens      *int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return Response{}, errors.New("model: invalid JSON response")
@@ -249,7 +253,10 @@ func (c *Client) Complete(ctx context.Context, in Request) (Response, error) {
 	if len(wire.Choices) != 1 {
 		return Response{}, errors.New("model: response must contain exactly one choice")
 	}
-	out := Response{Message: wire.Choices[0].Message, FinishReason: wire.Choices[0].FinishReason, Usage: wire.Usage}
+	out := Response{Message: wire.Choices[0].Message, FinishReason: wire.Choices[0].FinishReason, Usage: unknownUsage()}
+	if wire.Usage != nil {
+		out.Usage = measuredUsage(wire.Usage.PromptTokens, wire.Usage.CompletionTokens, wire.Usage.TotalTokens)
+	}
 	if out.Message.Role != "assistant" || (out.FinishReason != "stop" && out.FinishReason != "tool_calls") {
 		return Response{}, errors.New("model: unsupported completion response")
 	}

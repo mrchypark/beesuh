@@ -87,6 +87,67 @@ func TestCredentialResolverReentryDoesNotDeadlockClose(t *testing.T) {
 	}
 }
 
+// Every public entry point that takes the lifecycle lock must reject a context
+// supplied to a credential resolver before it attempts that lock. Holding the
+// write lock makes a missing early check deterministic: the call blocks on the
+// old implementation, while the guarded implementation returns immediately.
+func TestResolverReentryIsRejectedBeforeLifecycleLock(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*Runtime, context.Context) error
+	}{
+		{
+			name: "run",
+			call: func(r *Runtime, ctx context.Context) error {
+				_, err := r.Run(ctx, Request{})
+				return err
+			},
+		},
+		{
+			name: "recover",
+			call: func(r *Runtime, ctx context.Context) error {
+				return r.Recover(ctx)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// closed makes the old implementation return safely after the test
+			// releases its lock, without needing a database fixture.
+			r := &Runtime{closed: true}
+			r.life.Lock()
+			locked := true
+			unlock := func() {
+				if locked {
+					r.life.Unlock()
+					locked = false
+				}
+			}
+			defer unlock()
+
+			ctx := context.WithValue(context.Background(), resolverReentryKey{}, true)
+			done := make(chan error, 1)
+			go func() { done <- test.call(r, ctx) }()
+
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrResolverReentry) {
+					t.Fatalf("reentry error = %v, want ErrResolverReentry", err)
+				}
+			case <-time.After(time.Second):
+				// Let the old implementation return ErrClosed so this test never
+				// leaves a goroutine blocked on the lifecycle lock after failing.
+				unlock()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("reentry remained blocked after releasing lifecycle lock")
+				}
+				t.Fatal("reentry attempted the lifecycle lock instead of rejecting immediately")
+			}
+		})
+	}
+}
+
 func waitFor(t *testing.T, ch chan struct{}, msg string) {
 	t.Helper()
 	select {

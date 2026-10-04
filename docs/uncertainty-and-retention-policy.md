@@ -42,6 +42,15 @@ coordinated recovery over shared mutable downstream resources.
 
 The accepted cost is that independent work in that workspace may pause.
 
+Run recovery has a separate in-memory fence. `Recover` holds the exclusive
+lifecycle lock and reads both active session requests and running run records
+before rebuilding that fence. This releases a stale fence when `finish`
+committed but its acknowledgement was lost. Each completed workspace is checked
+against both sources again before its fence is cleared. A running record without
+a recoverable session stays fenced and makes recovery return `ErrUncertain`.
+Query failures never count as proof that work has finished. None of these steps
+resolves a pending external-effect record.
+
 ## 2. Revocation is two-phase: local denial first, external confirmation later
 
 Under the connection lock, record revocation intent durably, advance the
@@ -53,6 +62,17 @@ disabled* from *external revocation confirmed*.
 Intent, generation increment, and the local `revoked` flip commit as one
 statement batch. A mutex alone provides no crash atomicity; Rhiza applies a
 multi-statement batch inside a single transaction.
+
+After that authorized transition commits, confirmation checks the exact stored
+connection identity and revocation generation without reauthorizing the user.
+Disabling the user must not prevent completion of the admitted cleanup. New
+public requests still require current authorization. The host revoker must be
+idempotent for the supplied connection generation and must not redirect its
+credential reference to a newer credential while an old callback can run.
+
+Trusted provisioning with `State: "revoked"` declares an already-terminal
+connection. Registration stores its confirmed revocation row atomically, as the
+legacy backfill does, so repeated revocation does not invoke the host again.
 
 The host callback runs under the earlier of the caller's deadline and
 `Options.RevocationTimeout` (30s default). Go cannot forcibly terminate
@@ -78,6 +98,11 @@ Token limits are reported as `enforced`, `requested`, or `unavailable`,
 separately from whether usage is available. The Codex CLI and app-server
 adapters treat a requested maximum as a hint, not an enforced ceiling, and do
 not return real usage; that is reported as `unknown`, not as zero.
+
+HTTP adapters also report unknown usage when required counters are missing,
+null, or negative. Explicit zero counters remain valid measured usage.
+Anthropic cache counters are optional and are included when present; totals
+that overflow the local integer range are reported as unknown.
 
 A request that requires an enforced limit is rejected before execution. An
 advisory budget is allowed only when the caller explicitly permits it. If the

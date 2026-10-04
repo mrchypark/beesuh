@@ -45,8 +45,7 @@ func (c *Client) completeAnthropic(ctx context.Context, in Request) (Response, e
 	if wire.Role != "assistant" || (wire.StopReason != "end_turn" && wire.StopReason != "tool_use") {
 		return Response{}, errors.New("model: unsupported anthropic completion")
 	}
-	out := Response{Message: Message{Role: "assistant"}, Usage: Usage{PromptTokens: wire.Usage.InputTokens + wire.Usage.CacheReadInputTokens + wire.Usage.CacheCreationInputTokens, CompletionTokens: wire.Usage.OutputTokens}}
-	out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CompletionTokens
+	out := Response{Message: Message{Role: "assistant"}, Usage: anthropicUsage(wire.Usage)}
 	state := make([]json.RawMessage, 0, len(wire.Content))
 	hasThinking := false
 	for _, raw := range wire.Content {
@@ -91,15 +90,39 @@ func (c *Client) completeAnthropic(ctx context.Context, in Request) (Response, e
 }
 
 type anthropicWire struct {
-	Role       string            `json:"role"`
-	StopReason string            `json:"stop_reason"`
-	Content    []json.RawMessage `json:"content"`
-	Usage      struct {
-		InputTokens              int `json:"input_tokens"`
-		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-		OutputTokens             int `json:"output_tokens"`
-	} `json:"usage"`
+	Role       string              `json:"role"`
+	StopReason string              `json:"stop_reason"`
+	Content    []json.RawMessage   `json:"content"`
+	Usage      *anthropicUsageWire `json:"usage"`
+}
+
+type anthropicUsageWire struct {
+	InputTokens              *int `json:"input_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	OutputTokens             *int `json:"output_tokens"`
+}
+
+func anthropicUsage(usage *anthropicUsageWire) Usage {
+	if usage == nil || usage.InputTokens == nil || usage.OutputTokens == nil {
+		return unknownUsage()
+	}
+	values := []int{*usage.InputTokens}
+	if usage.CacheReadInputTokens != nil {
+		values = append(values, *usage.CacheReadInputTokens)
+	}
+	if usage.CacheCreationInputTokens != nil {
+		values = append(values, *usage.CacheCreationInputTokens)
+	}
+	prompt, ok := sumUsage(values...)
+	if !ok {
+		return unknownUsage()
+	}
+	total, ok := sumUsage(prompt, *usage.OutputTokens)
+	if !ok {
+		return unknownUsage()
+	}
+	return measuredUsage(&prompt, usage.OutputTokens, &total)
 }
 
 type anthropicContent struct {

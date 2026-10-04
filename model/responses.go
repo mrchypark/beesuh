@@ -93,7 +93,10 @@ func (c *Client) completeResponses(ctx context.Context, in Request) (Response, e
 	if err := validateToolCalls(out.Message.ToolCalls); err != nil {
 		return Response{}, err
 	}
-	out.Usage = Usage{PromptTokens: wire.Usage.InputTokens, CompletionTokens: wire.Usage.OutputTokens, TotalTokens: wire.Usage.TotalTokens}
+	out.Usage = unknownUsage()
+	if wire.Usage != nil {
+		out.Usage = measuredUsage(wire.Usage.InputTokens, wire.Usage.OutputTokens, wire.Usage.TotalTokens)
+	}
 	return out, nil
 }
 
@@ -102,10 +105,10 @@ type responsesWire struct {
 	Error             any               `json:"error"`
 	IncompleteDetails any               `json:"incomplete_details"`
 	Output            []json.RawMessage `json:"output"`
-	Usage             struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-		TotalTokens  int `json:"total_tokens"`
+	Usage             *struct {
+		InputTokens  *int `json:"input_tokens"`
+		OutputTokens *int `json:"output_tokens"`
+		TotalTokens  *int `json:"total_tokens"`
 	} `json:"usage"`
 }
 

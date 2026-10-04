@@ -69,3 +69,24 @@ func (u Usage) Available() bool {
 func unknownUsage() Usage {
 	return Usage{PromptTokens: -1, CompletionTokens: -1, TotalTokens: -1}
 }
+
+// measuredUsage converts a complete, non-negative provider usage record. A
+// missing, partial, or invalid record is unknown rather than a false zero.
+func measuredUsage(prompt, completion, total *int) Usage {
+	if prompt == nil || completion == nil || total == nil || *prompt < 0 || *completion < 0 || *total < 0 {
+		return unknownUsage()
+	}
+	return Usage{PromptTokens: *prompt, CompletionTokens: *completion, TotalTokens: *total}
+}
+
+func sumUsage(values ...int) (int, bool) {
+	max := int(^uint(0) >> 1)
+	total := 0
+	for _, value := range values {
+		if value < 0 || value > max-total {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
+}

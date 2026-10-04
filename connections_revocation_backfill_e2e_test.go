@@ -48,8 +48,8 @@ func TestRevokedConnectionFromOlderSchemaNeverCallsHostRevoker(t *testing.T) {
 	}
 }
 
-// seedLegacyRevokedConnection builds the newest schema that still predates
-// connection_revocations, then stores a connection that is already revoked.
+// seedLegacyRevokedConnection builds schema version 8 before the backfill,
+// then stores a revoked connection without a revocation confirmation row.
 // The data dir is the one Open passes to Rhiza, so the runtime under test
 // migrates it forward itself.
 func seedLegacyRevokedConnection(t *testing.T, ctx context.Context, rhizaDir string) {
@@ -73,7 +73,7 @@ func seedLegacyRevokedConnection(t *testing.T, ctx context.Context, rhizaDir str
 		connectionRevocationMigration,
 	}
 	if err := db.Migrate(ctx, beforeRevocations); err != nil {
-		t.Fatalf("migrate through the last schema without revocations: %v", err)
+		t.Fatalf("migrate through version 8 before the backfill: %v", err)
 	}
 	insert, err := db.Execute(ctx, rhiza.ExecuteRequest{RequestID: "legacy-revoked-connection-e2e", SQL: `INSERT INTO connections(id,user_id,workspace_id,kind,target_id,credential_ref,state,generation) VALUES(?,?,?,?,?,?,?,?)`, Args: []any{"legacy", "u", "w", "provider", "work", "credential", "revoked", int64(7)}})
 	if err != nil || insert.Status != rhiza.MutationCommitted {

@@ -124,7 +124,13 @@ func (r *Runtime) RegisterConnection(ctx context.Context, c Connection) error {
 			return err
 		}
 	}
-	return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO connections(id,user_id,workspace_id,kind,target_id,credential_ref,state,generation) VALUES(?,?,?,?,?,?,?,?)`, Args: []any{c.ID, c.UserID, c.WorkspaceID, c.Kind, c.TargetID, c.CredentialRef, c.State, c.Generation}}})
+	statements := []rhiza.SQLStatement{{SQL: `INSERT INTO connections(id,user_id,workspace_id,kind,target_id,credential_ref,state,generation) VALUES(?,?,?,?,?,?,?,?)`, Args: []any{c.ID, c.UserID, c.WorkspaceID, c.Kind, c.TargetID, c.CredentialRef, c.State, c.Generation}}}
+	if c.State == "revoked" {
+		// Trusted provisioning declares an already-terminal connection, just as
+		// the legacy backfill does. Persist confirmation in the same transaction.
+		statements = append(statements, rhiza.SQLStatement{SQL: `INSERT INTO connection_revocations(connection_id,generation,state) VALUES(?,?,'confirmed')`, Args: []any{c.ID, c.Generation}})
+	}
+	return r.mutate(ctx, statements)
 }
 
 // Connections returns only connections owned by the authenticated principal.
@@ -253,7 +259,7 @@ func (r *Runtime) revokeCredential(ctx context.Context, c Connection) error {
 		r.life.RUnlock()
 		return ErrRevocationPending
 	}
-	current, err := r.ownedConnection(ctx, c.ID)
+	current, err := r.revocationSnapshot(ctx, c)
 	r.life.RUnlock()
 	if err != nil {
 		return ErrRevocationPending
@@ -290,6 +296,23 @@ func (r *Runtime) revokeCredential(ctx context.Context, c Connection) error {
 		return ErrRevocationPending
 	}
 	return nil
+}
+
+// revocationSnapshot verifies the exact intent already authorized and committed
+// by SetConnectionState. Completing that intent must not require fresh user
+// authorization: the user may have been disabled after local denial committed.
+func (r *Runtime) revocationSnapshot(ctx context.Context, want Connection) (Connection, error) {
+	rows, err := r.query(ctx, `SELECT c.id,c.user_id,c.workspace_id,c.kind,c.target_id,c.credential_ref,c.state,c.generation,v.state
+FROM connections c JOIN connection_revocations v ON v.connection_id=c.id
+WHERE c.id=? AND c.user_id=? AND c.workspace_id=? AND c.kind=? AND c.target_id=? AND c.credential_ref=? AND c.state='revoked' AND c.generation=? AND v.generation=c.generation`,
+		want.ID, want.UserID, want.WorkspaceID, want.Kind, want.TargetID, want.CredentialRef, want.Generation)
+	if err != nil {
+		return Connection{}, err
+	}
+	if len(rows) != 1 {
+		return Connection{}, ErrRevocationPending
+	}
+	return connectionFromFullRow(rows[0]), nil
 }
 
 func (r *Runtime) setRevocationState(ctx context.Context, c Connection, state string) error {

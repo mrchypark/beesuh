@@ -59,6 +59,9 @@ type Model = opencode.Model
 
 type Options struct {
 	ResolveCredential func(context.Context, Connection) (Credential, error)
+	// RevokeCredential must revoke only the supplied connection generation and
+	// be idempotent for that identity. The host must not retarget its credential
+	// reference to a newer credential while this callback can still run.
 	RevokeCredential  func(context.Context, Connection) error
 	RevocationTimeout time.Duration
 	// RequireIdentity enables service-owned user isolation; Authorize checks current membership/activity.
@@ -273,6 +276,9 @@ func (r *Runtime) Close() error {
 // Run stores the result before returning it. Repeating an identical request
 // returns that stored result; it never sends a second prompt.
 func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return Result{}, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -859,6 +865,9 @@ func (r *Runtime) reclaimPendingSession(ctx context.Context, req Request, remote
 // Recover explicitly aborts unresolved sessions and records interrupted results.
 // It never retries their tools or claims that their external effects rolled back.
 func (r *Runtime) Recover(ctx context.Context) error {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return err
+	}
 	r.life.Lock()
 	defer r.life.Unlock()
 	if r.closed {
@@ -874,6 +883,20 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A finish can commit while its acknowledgement is lost. Rebuild the run
+	// fences from durable work, including running rows without a session mapping.
+	// life is exclusively held, so no Run can install a newer obligation between
+	// this linearizable read and the map update. Effect fences remain untouched.
+	outstanding, err := r.query(ctx, `SELECT workspace FROM sessions WHERE active_request<>'' UNION SELECT workspace FROM runs WHERE state='running'`)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.runFenced = make(map[string]struct{}, len(outstanding))
+	for _, row := range outstanding {
+		r.runFenced[row[0].(string)] = struct{}{}
+	}
+	r.mu.Unlock()
 	// pending tallies every discovered run each workspace owes before any of them
 	// is settled. Counting during the scan itself would let the first row of a
 	// two-run workspace drop the count to zero and reopen it while its second run
@@ -892,13 +915,32 @@ func (r *Runtime) Recover(ctx context.Context) error {
 		}
 		pending[workspace]--
 		if pending[workspace] == 0 {
-			// Every discovered run for this workspace is now persisted. Only Recover
-			// clears a run fence, and doing it here rather than after the full scan
-			// keeps a failure in a later workspace from stranding this one: its
-			// active_request rows are already cleared, so a retry could never
-			// rediscover it and would leave the fence up forever.
-			r.unfenceRunWorkspace(workspace)
+			// Finishing the discovered sessions does not settle an orphan running
+			// row. Prove both sources empty before clearing this workspace, without
+			// delaying its release until later workspaces have also succeeded.
+			if err := r.clearCompletedRunFence(ctx, workspace); err != nil {
+				return err
+			}
 		}
+	}
+	r.mu.Lock()
+	unresolved := len(r.runFenced) != 0
+	r.mu.Unlock()
+	if unresolved {
+		return errors.Join(ErrUncertain, errors.New("beesuh: running work remains without a recoverable session"))
+	}
+	return nil
+}
+
+// clearCompletedRunFence requires the caller to hold life exclusively. A failed
+// read leaves the fence intact even when the preceding finish already committed.
+func (r *Runtime) clearCompletedRunFence(ctx context.Context, workspace string) error {
+	remaining, err := r.query(ctx, `SELECT 1 FROM sessions WHERE workspace=? AND active_request<>'' UNION ALL SELECT 1 FROM runs WHERE workspace=? AND state='running' LIMIT 1`, workspace, workspace)
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 0 {
+		r.unfenceRunWorkspace(workspace)
 	}
 	return nil
 }

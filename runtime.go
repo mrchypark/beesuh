@@ -29,6 +29,7 @@ var (
 	ErrClosed       = errors.New("beesuh: runtime closed")
 	ErrInvalidInput = errors.New("beesuh: invalid input")
 	ErrNotFound     = errors.New("beesuh: run not found")
+	ErrCapacity     = errors.New("beesuh: retained capacity reached")
 	// ErrResolverReentry rejects a credential resolver that calls back into the
 	// runtime. Run holds the lifecycle read lock for the whole execution, so a
 	// nested read lock behind a pending Close would deadlock both operations and
@@ -74,6 +75,7 @@ type Options struct {
 	Permissions               []opencode.PermissionRule
 	MaxConcurrent, MaxWaiting int
 	Timeout                   time.Duration
+	Capacity                  CapacityLimits
 }
 
 type Request struct {
@@ -107,7 +109,7 @@ type sessionLock struct {
 // Runtime owns its Rhiza directory exclusively. All clients of its OpenCode
 // sessions must go through this instance for the concurrency limits to hold.
 type Runtime struct {
-	db      *rhiza.DB
+	db      runtimeDB
 	client  *opencode.Client
 	native  *nativeEngine
 	opts    Options
@@ -126,12 +128,25 @@ type Runtime struct {
 	// its POST is still in flight. Dispatch holds the read lock, resolution
 	// holds the write lock, so a fence row can only change disposition while no
 	// effect for it is being sent. Multiple dispatches stay concurrent.
-	fenceMu sync.RWMutex
-	mu      sync.Mutex
-	locks   map[string]*sessionLock
+	fenceMu  sync.RWMutex
+	mu       sync.Mutex
+	locks    map[string]*sessionLock
+	capacity CapacityLimits
+}
+
+// runtimeDB keeps production on Rhiza while allowing deterministic storage
+// acknowledgement-loss tests around the narrow persistence boundary.
+type runtimeDB interface {
+	Close() error
+	Execute(context.Context, rhiza.ExecuteRequest) (rhiza.ExecuteResponse, error)
+	Query(context.Context, rhiza.QueryRequest) (rhiza.QueryResponse, error)
 }
 
 func Open(ctx context.Context, opts Options) (*Runtime, error) {
+	if !opts.Capacity.valid() {
+		return nil, errors.New("beesuh: capacity limits cannot be negative")
+	}
+	opts.Capacity = opts.Capacity.withDefaults()
 	if opts.RequireIdentity {
 		if opts.Native == nil || opts.Authorize == nil || opts.ResolveCredential == nil {
 			return nil, errors.New("beesuh: service mode requires native backend, authorization and credential resolvers")
@@ -153,7 +168,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, errors.New("beesuh: named Conductor targets require service mode")
 	}
 
-	if opts.DataDir == "" || strings.TrimSpace(opts.BackendID) == "" || opts.MaxConcurrent < 1 || opts.MaxWaiting < 0 || opts.MaxConcurrent > 1024 || opts.MaxWaiting > 10000 {
+	if opts.DataDir == "" || strings.TrimSpace(opts.BackendID) == "" || len(opts.BackendID) > 256 || len(opts.OpenCode.Directory) > 4096 || opts.MaxConcurrent < 1 || opts.MaxWaiting < 0 || opts.MaxConcurrent > 1024 || opts.MaxWaiting > 10000 {
 		return nil, errors.New("beesuh: data directory, backend identity and bounded positive concurrency are required")
 	}
 	if opts.Timeout == 0 {
@@ -185,7 +200,11 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		if opts.Model != nil {
 			return nil, errors.New("beesuh: native model is configured through Native.Provider")
 		}
-		native, err = newNative(*opts.Native)
+		if opts.RequireIdentity {
+			native, err = newServiceNative(*opts.Native)
+		} else {
+			native, err = newNative(*opts.Native)
+		}
 		// Native conversations have no OpenCode working-directory dependency.
 		opts.OpenCode.Directory = ""
 	} else {
@@ -210,7 +229,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		f.Close()
 		return nil, err
 	}
-	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock)}
+	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock), capacity: opts.Capacity}
 	r.profile = digest(opts.Permissions)
 	if native != nil {
 		r.profile = native.profile
@@ -218,9 +237,16 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	err = db.Migrate(ctx, []rhiza.Migration{{Version: 1, Name: "sessions-and-runs", Statements: []rhiza.SQLStatement{
 		{SQL: `CREATE TABLE sessions (workspace TEXT NOT NULL, session_key TEXT NOT NULL, backend TEXT NOT NULL, directory TEXT NOT NULL, profile TEXT NOT NULL, session_id TEXT NOT NULL, active_request TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,session_key))`},
 		{SQL: `CREATE TABLE runs (workspace TEXT NOT NULL, request_id TEXT NOT NULL, session_key TEXT NOT NULL, input_hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,request_id))`},
-	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration})
+	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration})
 	if err == nil {
 		err = r.pinIdentityMode(ctx)
+	}
+	if err == nil {
+		// This process exclusively owns the directory. startRun atomically
+		// creates a running row and removes its reservation before dispatch.
+		// Surviving reservations therefore represent pre-dispatch work only.
+		// Remote session creation has its own durable intent, which stays intact.
+		err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `DELETE FROM capacity_run_reservations`}})
 	}
 	if err == nil && native != nil {
 		// Reconcile effects that predate the uncertainty table before any
@@ -364,22 +390,36 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 			return Result{}, err
 		}
 	}
+	if err := r.reserveRun(ctx, req); err != nil {
+		// A storage failure can be reported after this pre-dispatch reservation
+		// committed. This request lock excludes a live sibling with these keys.
+		if cleanupErr := r.releaseRunReservation(req); cleanupErr != nil {
+			return Result{}, errors.Join(err, cleanupErr)
+		}
+		return Result{}, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			if err := r.releaseRunReservation(req); err != nil {
+				slog.Error("beesuh: releasing failed run admission reservation", "workspace", req.WorkspaceID, "request", req.RequestID, "error", err)
+			}
+		}
+	}()
 	sessionID, err := r.session(ctx, req)
 	if err != nil {
 		return Result{}, err
 	}
 	// Persist the uncertain interval before sending anything to the agent.
-	// The two statements form one atomic batch. A failure therefore leaves either
-	// both effects committed (a running row plus active_request, which Recover
+	// The statements form one atomic batch. A failure therefore leaves either
+	// the running row plus active_request committed, which Recover
 	// discovers) or neither, with no external dispatch to reconcile. Installing a
 	// run fence here would strand the workspace with no evidence to lift it.
-	err = r.mutate(ctx, []rhiza.SQLStatement{
-		{SQL: `INSERT INTO runs(workspace,request_id,session_key,input_hash,state) VALUES(?,?,?,?,'running')`, Args: []any{req.WorkspaceID, req.RequestID, req.SessionKey, hash}},
-		{SQL: `UPDATE sessions SET active_request=? WHERE workspace=? AND session_key=? AND active_request=''`, Args: []any{req.RequestID, req.WorkspaceID, req.SessionKey}, ExpectedRowsAffected: one()},
-	})
+	err = r.startRun(ctx, req, hash)
 	if err != nil {
 		return Result{}, err
 	}
+	reserved = false
 	if r.native != nil {
 		return r.runNative(ctx, req, sessionID, schema)
 	}
@@ -589,7 +629,7 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			}
 		}
 	}
-	err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO sessions(workspace,session_key,backend,directory,profile,session_id) VALUES(?,?,?,?,?,?)`, Args: []any{req.WorkspaceID, req.SessionKey, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, id}}})
+	err = r.insertSession(ctx, req, id, r.native == nil)
 	if err != nil && r.native == nil {
 		// The remote session exists but nothing durable points at it, so no later
 		// abort, recovery, or retention pass can ever reach it. Release it here.
@@ -613,10 +653,14 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			// Another writer, or this runtime's own committed write, already owns
 			// the session. Releasing it would delete live conversation history.
 			slog.Error("beesuh: session mapping insert failed but the session is referenced; preserving it", "session", id, "mapped", mapped)
-			if clearErr := r.clearPendingCreate(req); clearErr != nil {
-				slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
-			}
+			// A committed pending mapping consumes its intent in the same mutation.
 			return mapped, err
+		}
+		// Persist the cleanup phase before the first DELETE. A crash after the
+		// remote call but before this write would otherwise let a resumed
+		// creating intent adopt a session whose delete is still in flight.
+		if markErr := r.markPendingCreateCleanup(ctx, req, id); markErr != nil {
+			return "", errors.Join(err, ErrUncertain, markErr)
 		}
 		// The reclaim must not inherit a cancelled or expired request context,
 		// because a cancelled request is itself a common cause of the mapping
@@ -631,20 +675,11 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			// destroyed later. Record that uncertainty against the intent and keep
 			// it: clearing would discard the only evidence, let the next request
 			// create a fresh session, and strand this one permanently.
-			if markErr := r.markPendingCreateCleanup(ctx, req, id); markErr != nil {
-				slog.Error("beesuh: recording an unresolved session cleanup failed", "session_key", req.SessionKey, "error", markErr)
-			}
 			return "", err
 		}
 		// The remote session is released or gone, so the intent that could adopt
 		// it must not survive. Leaving it would let a later create for the same
 		// session key match a stale title and adopt an unrelated session.
-		if clearErr := r.clearPendingCreate(req); clearErr != nil {
-			slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
-		}
-	} else if err == nil && r.native == nil {
-		// The mapping is durable, so ownership is settled and the intent is no
-		// longer a recovery candidate.
 		if clearErr := r.clearPendingCreate(req); clearErr != nil {
 			slog.Error("beesuh: clearing a settled session-create intent failed", "session_key", req.SessionKey, "error", clearErr)
 		}
@@ -661,8 +696,9 @@ const (
 	// pendingPhaseCreating means a create may have produced a session whose
 	// local mapping was never written.
 	pendingPhaseCreating = "creating"
-	// pendingPhaseCleanup means a delete was issued for remote_id and its
-	// outcome is unknown, so the session may still be destroyed.
+	// pendingPhaseCleanup identifies a reserved delete for remote_id whose
+	// outcome may become unknown. It is persisted before the first DELETE so a
+	// restart never adopts a session whose delete can still be in flight.
 	pendingPhaseCleanup = "cleanup"
 )
 
@@ -707,7 +743,7 @@ func (r *Runtime) pendingCreateToken(ctx context.Context, req Request) (token, p
 		return rows[0][0].(string), rows[0][1].(string), rows[0][2].(string), true, nil
 	}
 	token = rand.Text()
-	err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO pending_session_creates(workspace,session_key,ownership_token,backend,directory,profile,phase,remote_id,recorded_at) VALUES(?,?,?,?,?,?,?,'',?) ON CONFLICT(workspace,session_key) DO NOTHING`, Args: []any{req.WorkspaceID, req.SessionKey, token, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, pendingPhaseCreating, time.Now().Unix()}}})
+	err = r.reservePendingCreate(ctx, req, token)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -810,10 +846,10 @@ func (r *Runtime) sessionUntracked(ctx context.Context, req Request, id string) 
 	return "", false
 }
 
-// markPendingCreateCleanup records that a delete was issued for remote_id and
-// its outcome is unknown. The intent is kept so a later request can finish the
-// delete; clearing it here would return the runtime to the original untracked
-// orphan failure.
+// markPendingCreateCleanup records the remote ID before a DELETE is issued.
+// The intent is kept so a later request can finish a lost or failed delete;
+// clearing it here would return the runtime to the original untracked orphan
+// failure.
 //
 // The update is conditional on the phase it expects, and the affected row
 // count is verified. Storage can report success for a statement that matched
@@ -849,9 +885,8 @@ func (r *Runtime) reclaimPendingSession(ctx context.Context, req Request, remote
 	deleteErr := r.client.DeleteSession(reclaimCtx, remoteID)
 	cancel()
 	if deleteErr != nil {
-		if markErr := r.markPendingCreateCleanup(ctx, req, remoteID); markErr != nil {
-			slog.Error("beesuh: recording an unresolved session cleanup failed", "session_key", req.SessionKey, "error", markErr)
-		}
+		// The cleanup intent already records this target before the DELETE.
+		// Leave it intact for the next explicit recovery attempt.
 		return false, errors.Join(ErrUncertain, deleteErr)
 	}
 	// The delete was confirmed, so the session is gone and the intent that could
@@ -862,8 +897,9 @@ func (r *Runtime) reclaimPendingSession(ctx context.Context, req Request, remote
 	return true, nil
 }
 
-// Recover explicitly aborts unresolved sessions and records interrupted results.
-// It never retries their tools or claims that their external effects rolled back.
+// Recover explicitly aborts unresolved runs and settles admitted session creates
+// or cleanup without admitting a new run. It never retries tools or claims that
+// their external effects rolled back.
 func (r *Runtime) Recover(ctx context.Context) error {
 	if err := rejectResolverReentry(ctx); err != nil {
 		return err
@@ -875,6 +911,16 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
 	defer cancel()
+	// One unresolved run must not prevent settlement of independent session
+	// obligations, including when no new run slot can be admitted. Settle these
+	// first so a failed abort cannot consume their whole recovery budget.
+	sessionErr := r.recoverSessionCreates(ctx)
+	runErr := r.recoverRuns(ctx)
+	return errors.Join(runErr, sessionErr)
+}
+
+// recoverRuns requires the exclusive lifecycle lock held by Recover.
+func (r *Runtime) recoverRuns(ctx context.Context) error {
 	// Order the scan so one recovery attempt settles workspaces in a fixed
 	// sequence. Each workspace is unfenced as soon as its own runs are persisted,
 	// and a deterministic order keeps that sequence reproducible when a later
@@ -1004,9 +1050,15 @@ func (r *Runtime) mutate(ctx context.Context, statements []rhiza.SQLStatement) e
 		return err
 	}
 	if res.Status != rhiza.MutationCommitted {
-		return fmt.Errorf("beesuh: storage mutation rejected (%s)", res.ErrorCode)
+		return storageMutationError{code: res.ErrorCode}
 	}
 	return nil
+}
+
+type storageMutationError struct{ code string }
+
+func (e storageMutationError) Error() string {
+	return fmt.Sprintf("beesuh: storage mutation rejected (%s)", e.code)
 }
 
 func (r *Runtime) lockSession(ctx context.Context, key string) (func(), error) {

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -316,31 +317,148 @@ func TestOAuthTransportClosesBodyOnPreDispatchFailure(t *testing.T) {
 }
 
 func TestOAuthClientRejectsTokenExpiredDuringPersistence(t *testing.T) {
-	var dispatched, persisted atomic.Int32
-	expiry := time.Now().Add(12 * time.Second)
-	client, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		dispatched.Add(1)
-		return nil, errors.New("must not dispatch")
-	})}, func(context.Context) (*oauth2.Token, error) {
-		return &oauth2.Token{AccessToken: "token", Expiry: expiry}, nil
-	}, func(context.Context, *oauth2.Token) error {
-		persisted.Add(1)
-		time.Sleep(time.Until(expiry.Add(-10*time.Second)) + 100*time.Millisecond)
-		return nil
+	synctest.Test(t, func(t *testing.T) {
+		var dispatched, persisted atomic.Int32
+		expiry := time.Now().Add(12 * time.Second)
+		client, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			dispatched.Add(1)
+			return nil, errors.New("must not dispatch")
+		})}, func(context.Context) (*oauth2.Token, error) {
+			return &oauth2.Token{AccessToken: "token", Expiry: expiry}, nil
+		}, func(context.Context, *oauth2.Token) error {
+			persisted.Add(1)
+			time.Sleep(3 * time.Second)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "https://example.test", nil)
+		if _, err := client.Transport.RoundTrip(request); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("RoundTrip error = %v", err)
+		}
+		if got := persisted.Load(); got != 1 {
+			t.Fatalf("persist calls = %d", got)
+		}
+		if got := dispatched.Load(); got != 0 {
+			t.Fatalf("dispatches = %d", got)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := httptest.NewRequest(http.MethodGet, "https://example.test", nil)
-	if _, err := client.Transport.RoundTrip(request); !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("RoundTrip error = %v", err)
-	}
-	if got := persisted.Load(); got != 1 {
-		t.Fatalf("persist calls = %d", got)
-	}
-	if got := dispatched.Load(); got != 0 {
-		t.Fatalf("dispatches = %d", got)
-	}
+}
+
+func TestOAuthClientRetryPersistenceAtExpiryPersistsRotatedRefresh(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var dispatched, persistCalls, sourceCalls atomic.Int32
+		var stored *oauth2.Token
+		expiry := time.Now().Add(10 * time.Second)
+		client, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			dispatched.Add(1)
+			return nil, errors.New("must not dispatch")
+		})}, func(context.Context) (*oauth2.Token, error) {
+			switch sourceCalls.Add(1) {
+			case 1:
+				return &oauth2.Token{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", Expiry: expiry}, nil
+			case 2:
+				return &oauth2.Token{AccessToken: "expired-refresh", Expiry: time.Now()}, nil
+			default:
+				return nil, errors.New("source called too many times")
+			}
+		}, func(_ context.Context, token *oauth2.Token) error {
+			copyToken := *token
+			if persistCalls.Add(1) == 1 {
+				return errors.New("temporary storage failure")
+			}
+			stored = &copyToken
+			// oauth2 accepts the equality boundary, then rejects immediately after it.
+			time.Sleep(time.Nanosecond)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		first := &trackingReadCloser{Reader: strings.NewReader("first")}
+		firstRequest := httptest.NewRequest(http.MethodPost, "https://example.test", first)
+		if _, err := client.Transport.RoundTrip(firstRequest); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("first RoundTrip error = %v", err)
+		}
+		if !first.closed.Load() {
+			t.Fatal("first request body was not closed")
+		}
+
+		retry := &trackingReadCloser{Reader: strings.NewReader("retry")}
+		retryRequest := httptest.NewRequest(http.MethodPost, "https://example.test", retry)
+		if _, err := client.Transport.RoundTrip(retryRequest); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("retry RoundTrip error = %v", err)
+		}
+		if !retry.closed.Load() {
+			t.Fatal("retry request body was not closed")
+		}
+		if got := dispatched.Load(); got != 0 {
+			t.Fatalf("dispatches = %d", got)
+		}
+		if got := sourceCalls.Load(); got != 2 {
+			t.Fatalf("source calls = %d", got)
+		}
+		if got := persistCalls.Load(); got != 2 {
+			t.Fatalf("persist calls = %d", got)
+		}
+		if stored == nil || stored.AccessToken != "rotated-access" || stored.RefreshToken != "rotated-refresh" || !stored.Expiry.Equal(expiry) {
+			t.Fatalf("persisted retry token = %#v", stored)
+		}
+		transport := client.Transport.(*oauthTransport)
+		if transport.pending != nil || transport.last == nil || transport.last.RefreshToken != "rotated-refresh" {
+			t.Fatalf("retry state: pending=%#v last=%#v", transport.pending, transport.last)
+		}
+
+		// OAuthClient has no credential store of its own. The source and persist
+		// callbacks form that boundary, so a new client models close/reopen.
+		expiredReopened, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("reloaded expired access token was dispatched")
+			return nil, errors.New("must not dispatch")
+		})}, func(context.Context) (*oauth2.Token, error) { copyToken := *stored; return &copyToken, nil },
+			func(context.Context, *oauth2.Token) error {
+				t.Error("expired reloaded token was persisted again")
+				return nil
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := expiredReopened.Get("https://example.test"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("expired reopened token error = %v", err)
+		}
+		if !stored.Expiry.Equal(expiry) {
+			t.Fatal("reload renewed the expiry")
+		}
+		var reopenedDispatched atomic.Int32
+		reopened, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			reopenedDispatched.Add(1)
+			if got := request.Header.Get("Authorization"); got != "Bearer refreshed-access" {
+				t.Errorf("authorization = %q", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+		})}, func(context.Context) (*oauth2.Token, error) {
+			if stored == nil || stored.RefreshToken != "rotated-refresh" {
+				return nil, errors.New("rotated refresh was not stored")
+			}
+			return &oauth2.Token{AccessToken: "refreshed-access", RefreshToken: stored.RefreshToken, Expiry: time.Now().Add(time.Hour)}, nil
+		}, func(_ context.Context, token *oauth2.Token) error {
+			copyToken := *token
+			stored = &copyToken
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := reopened.Get("https://example.test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if got := reopenedDispatched.Load(); got != 1 {
+			t.Fatalf("reopened dispatches = %d", got)
+		}
+	})
 }
 
 func TestOAuthClientSerializesPersistenceAndCancellation(t *testing.T) {

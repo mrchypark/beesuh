@@ -22,6 +22,12 @@ GoAuthy profile에 연결하는 서버 전용 참조다. 사용자는 `/v1/chat`
 사용자 토큰 자체를 Codex 토큰으로 전달하지 않는다. `RequireIdentity` 모드에서 host가
 검증한 Principal과 `ResolveCredential`이 반드시 필요하다.
 
+Service의 `codex-cli` provider 설정은 template이다. 설정의 `CodexHome`은 사용하지
+않으며, 각 실행에서 resolver가 반환한 절대 경로 `CodexHome`과 `AccountID`를 검증한다.
+resolver 실패나 유효하지 않은 값은 subprocess 생성 전에 거절한다. template home으로
+fallback하지 않는다. Host는 해당 home이 허가된 계정의 로그인 store인지 보장해야 한다.
+Operator 모드에서는 각 CLI provider의 명시적 home이 필요하며, 정규화한 중복 home은 거절한다.
+
 ## 실험적 app-server 인증 어댑터
 
 `model.Config{Kind: "codex-app-server", Model: "..."}`를 명시적으로 선택한다.
@@ -81,3 +87,8 @@ ChatGPT 계정 로그인·토큰 갱신 또는 GoAuthy 확장과의 live 통합 
 프로세스를 종료했다. 이는 CLI/RPC 설정 호환 확인이며 로그인·모델 실행 검증이 아니다.
 배포 host는 검증한 Codex binary를 `Command`로 고정해야 한다. 다른 버전에서 계약이
 거절되면 자동으로 전역 인증이나 다른 계정으로 fallback하지 않는다.
+
+2026-10-04 검증: 이 host의 Codex 0.152.0에서 생성한 experimental schema의
+`turn/completed` 오류 variant를 확인했다. 구조화된 `unauthorized`는 Runtime에서 해당
+connection만 `needs_login`으로 전환하며, 실패 결과를 저장하고 자동으로 재실행하지 않는다.
+이 검증은 fixture 기반이다. 인증된 실제 provider 검증은 [배포 검증 #19](https://github.com/mrchypark/beesuh/issues/19)에 남아 있다.

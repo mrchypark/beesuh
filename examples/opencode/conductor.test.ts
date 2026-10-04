@@ -18,56 +18,30 @@ function configure() {
 }
 
 describe("Conductor OpenCode tools", () => {
-  test("disables legacy emission by default so a retry cannot create a second effect", async () => {
+  test.each([undefined, "0", "1"])("permanently rejects stale conductor_emit definitions when CONDUCTOR_LEGACY_EMIT_UNSAFE=%s", async (value) => {
     configure()
-    delete process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE
+    if (value === undefined) delete process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE
+    else process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE = value
     const calls: Request[] = []
     const savedFetch = globalThis.fetch
     globalThis.fetch = async (input, init) => {
       calls.push(new Request(input, init))
-      throw new Error("lost acknowledgement")
+      throw new Error("network must not run")
     }
     try {
-      await expect(emit.execute({ name: "order.created", data: { order_id: "o_1" } }, context())).rejects.toThrow("Legacy Conductor emission is disabled")
-      await expect(emit.execute({ name: "order.created", data: { order_id: "o_1" } }, { ...context(), messageID: "msg_2" })).rejects.toThrow("Legacy Conductor emission is disabled")
+      // Call the loaded legacy handler directly, as an already-open OpenCode
+      // session can retain its stale tool definition after configuration changes.
+      const attempts = await Promise.allSettled([
+        emit.execute({ name: "stale-conductor_emit", data: { order_id: "o_1" } }, context()),
+        emit.execute({ name: "stale-conductor_emit", data: { order_id: "o_1" } }, { ...context(), messageID: "msg_2" }),
+      ])
+      expect(attempts.map((attempt) => attempt.status)).toEqual(["rejected", "rejected"])
+      expect(attempts.map((attempt) => String((attempt as PromiseRejectedResult).reason))).toEqual([
+        "Error: Legacy Conductor emission is permanently disabled. Use the Beesuh native Conductor boundary for consequential work.",
+        "Error: Legacy Conductor emission is permanently disabled. Use the Beesuh native Conductor boundary for consequential work.",
+      ])
     } finally { globalThis.fetch = savedFetch }
     expect(calls).toHaveLength(0)
-  })
-
-  test("queues one bound execution with trusted linkage", async () => {
-    configure()
-    const calls: Request[] = []
-    const savedFetch = globalThis.fetch
-    globalThis.fetch = async (input, init) => {
-      const request = new Request(input, init); calls.push(request.clone())
-      const key = (await request.json() as { events: Array<{ idempotency_key: string }> }).events[0].idempotency_key
-      return new Response(JSON.stringify({ accepted: true, events: [{ execution_id: "exec_1", execution_request_id: key, status: "queued" }] }), { status: 202 })
-    }
-    try { await emit.execute({ name: "order.created", data: { order_id: "o_1" } }, context()) } finally { globalThis.fetch = savedFetch }
-    expect(calls).toHaveLength(1)
-    expect(calls[0].url).toBe("https://conductor.example/base/v1/events")
-    expect(calls[0].headers.get("authorization")).toBe("Bearer secret")
-    const event = (await calls[0].json() as { events: Array<{ name: string; data: { _compos: Record<string, unknown> }; idempotency_key: string }> }).events[0]
-    expect(event.name).toBe("order.created")
-    expect(event.idempotency_key).toMatch(/^beesuh_[a-f0-9]{64}$/)
-    expect(event.data._compos).toEqual({ workspace_id: "workspace", execution_request_id: event.idempotency_key, handler_key: "payload.echo", handler_version: "1", operation_key: "payload.echo", actor: { type: "service", id: "beesuh" } })
-  })
-
-  test("rejects model routing metadata before the network", async () => {
-    configure()
-    const savedFetch = globalThis.fetch
-    globalThis.fetch = async () => { throw new Error("network must not run") }
-    try {
-      await expect(emit.execute({ name: "order.created", data: { _compos: {} } }, context())).rejects.toThrow("reserved metadata")
-      await expect(emit.execute({ name: "order.created", data: [] }, context())).rejects.toThrow("JSON object")
-    } finally { globalThis.fetch = savedFetch }
-  })
-
-  test("rejects a malformed acceptance response", async () => {
-    configure()
-    const savedFetch = globalThis.fetch
-    globalThis.fetch = async () => new Response("{}", { status: 202 })
-    try { await expect(emit.execute({ name: "order.created", data: {} }, context())).rejects.toThrow("response is invalid") } finally { globalThis.fetch = savedFetch }
   })
 
   test("reads a returned execution ID with a trailing-slash base path", async () => {

@@ -73,6 +73,7 @@ func TestReplayedFailureKeepsEveryCategory(t *testing.T) {
 		{"unavailable", auth.ErrUnavailable, FailureServiceUnavailable, auth.ErrUnavailable},
 		{"deadline", context.DeadlineExceeded, FailureDeadlineExceeded, context.DeadlineExceeded},
 		{"overloaded", ErrOverloaded, FailureOverloaded, ErrOverloaded},
+		{"storage capacity", &CapacityError{Resource: "runs", Limit: 1}, FailureStorageCapacity, ErrCapacity},
 		{"connection", ErrConnectionUnavailable, FailureConnectionUnavailable, ErrConnectionUnavailable},
 		{"not found", ErrNotFound, FailureNotFound, ErrNotFound},
 		{"conflict", ErrConflict, FailureRequestConflict, ErrConflict},

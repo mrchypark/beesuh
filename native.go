@@ -65,6 +65,38 @@ var nativeMigration = rhiza.Migration{Version: 2, Name: "native-journal-and-memo
 }}
 
 func newNative(opts NativeOptions) (*nativeEngine, error) {
+	if err := model.ValidateCodexProfileHomes(configuredProviders(opts)); err != nil {
+		return nil, fmt.Errorf("beesuh: %w", err)
+	}
+	return newNativeConfigured(opts)
+}
+
+// newServiceNative accepts CodexHome only from the per-connection credential
+// resolver. Service provider settings are templates, never login stores.
+func newServiceNative(opts NativeOptions) (*nativeEngine, error) {
+	if len(opts.Providers) != 0 {
+		providers := maps.Clone(opts.Providers)
+		for id, cfg := range providers {
+			if cfg.Kind == "codex-cli" {
+				cfg.CodexHome = ""
+				providers[id] = cfg
+			}
+		}
+		opts.Providers = providers
+	} else if opts.Provider.Kind == "codex-cli" {
+		opts.Provider.CodexHome = ""
+	}
+	return newNativeConfigured(opts)
+}
+
+func configuredProviders(opts NativeOptions) map[string]model.Config {
+	if len(opts.Providers) != 0 {
+		return opts.Providers
+	}
+	return map[string]model.Config{"default": opts.Provider}
+}
+
+func newNativeConfigured(opts NativeOptions) (*nativeEngine, error) {
 	if opts.TokenBudgetPolicy == "" {
 		opts.TokenBudgetPolicy = TokenBudgetStrict
 	}
@@ -94,9 +126,6 @@ func newNative(opts NativeOptions) (*nativeEngine, error) {
 	}
 	if len(configs) == 0 || len(configs) > 64 {
 		return nil, errors.New("beesuh: configure 1–64 providers")
-	}
-	if err := model.ValidateCodexProfileHomes(configs); err != nil {
-		return nil, fmt.Errorf("beesuh: %w", err)
 	}
 	n.opts.Providers = make(map[string]model.Config, len(configs))
 	for id, cfg := range configs {
@@ -230,7 +259,7 @@ func (r *Runtime) appendJournal(ctx context.Context, req Request, kind string, v
 	if len(b) > 24<<10 {
 		return errors.New("beesuh: journal record exceeds 24 KiB")
 	}
-	return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO journal(workspace,session_key,request_id,kind,payload) VALUES(?,?,?,?,?)`, Args: []any{req.WorkspaceID, req.SessionKey, req.RequestID, kind, string(b)}}})
+	return r.appendJournalBounded(ctx, req, kind, string(b))
 }
 
 func (r *Runtime) runNative(ctx context.Context, req Request, sessionID string, schema *jsonschema.Schema) (Result, error) {
@@ -352,6 +381,10 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 				return nil, err
 			}
 		}
+		// The response always needs a model record and an assistant message.
+		if err := r.journalSpace(ctx, req, 2); err != nil {
+			return nil, err
+		}
 		messages, err := n.context(system, history, current, req.Prompt.Schema)
 		if err != nil {
 			return nil, err
@@ -408,6 +441,10 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 			}
 			if seenCalls[call.ID] {
 				return nil, errors.New("beesuh: repeated tool call identity")
+			}
+			// Intent, result, and tool message must all fit before the effect.
+			if err := r.journalSpace(ctx, req, 3); err != nil {
+				return nil, err
 			}
 			seenCalls[call.ID] = true
 			result, err := r.nativeTool(ctx, req, call)

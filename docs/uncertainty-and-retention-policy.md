@@ -112,19 +112,66 @@ by rejecting until the caller opts into advisory behavior.
 Inclusive token totals are not monetary cost totals. Cached input counts toward
 prompt tokens, so cached workloads report larger numbers than before.
 
-## 4. Retention: preserve unresolved evidence (pruning NOT implemented)
+## 4. Retention: bounded admission, permanent evidence
 
-ChatGPT Pro reviewed this section and rejected the earlier claim: *"a
-declaration implements no retention policy." The previous draft asserted a
-30-day terminal TTL and idle-session expiry. **Neither exists in code.** They
-are recorded here as intended future work, not as shipped behaviour. The
-`DefaultTerminalRetention` constant was removed for exactly this reason.
+The runtime retains request identities, terminal results, and unresolved
+evidence. It refuses new execution admission when a finite retained-record
+limit is reached. It does not prune payloads or expire idle sessions.
 
-Implemented today:
+`Options.Capacity` applies in operator and service modes. Zero-valued fields
+select finite defaults; negative values are invalid.
 
-- Uncertain effects, and the evidence needed to reconcile them, have **no TTL
-  until authoritative resolution**; their payload retention period starts at
-  resolution.
+| Resource | Per workspace | Owned data directory |
+| --- | ---: | ---: |
+| Runs, including reservations and all terminal states | 10,000 | 100,000 |
+| Sessions, including pending creation reservations | 1,000 | 10,000 |
+| Pending session creation intents | 1,000 | 10,000 |
+| Connections, including revoked profiles | 1,000 | 10,000 |
+
+Admission checks and reservations use an atomic Rhiza statement batch before
+provider dispatch or remote session creation. Existing admitted work can settle
+without requesting another run slot. A run retains at most 256 journal records;
+the execution owner checks space for the complete model or tool lifecycle before
+dispatch. Existing stricter payload bounds remain: journal records are at most
+24 KiB, and terminal output is at most 16 KiB. Oversized results fail or remain
+uncertain according to the existing persistence contract; they cannot become
+false success.
+
+An exact authorized request replay still works at capacity. Conflicting input
+still conflicts. Replay and pre-admission refusal do not append execution
+history. Reopening an over-limit store or lowering limits preserves existing
+evidence and blocks new admission. Uncertainty inspection, recovery, and
+resolution remain available.
+
+`CapacityError` identifies the exhausted resource and limit. HTTP callers receive
+503 with the safe `storage_capacity` category; directory-wide occupancy is not
+exposed to service users. `Runtime.CapacityLimits()` reports effective limits to
+the embedding host. The CLI exposes `-retained-runs`, `-retained-runs-total`,
+`-retained-sessions`, `-retained-sessions-total`, `-pending-session-creates`, and
+`-pending-session-creates-total`. Embedding services can also set
+`ConnectionsPerWorkspace` and `ConnectionsGlobal`; the corresponding CLI flags
+are `-retained-connections` and `-retained-connections-total`.
+
+At startup, pre-dispatch run reservations are reclaimed under exclusive
+directory ownership. The running-row transition consumes its reservation
+atomically before dispatch, so a surviving reservation cannot represent a
+running provider operation. Pending remote-session creation evidence is kept. Session mapping and consumption
+of its creation reservation commit in one batch, so one admitted session never
+occupies both records after a successful transition. Failed run admission clears
+its exact pre-dispatch reservation on a detached bounded context, including when
+the reservation committed but its acknowledgement was lost.
+
+This is bounded logical retention. It is not a physical disk quota. WAL,
+indexes, checkpointing, available filesystem space, and external provider
+storage require host monitoring. A filesystem write failure retains the
+existing fail-closed persistence and uncertainty behavior. Operators must not
+delete identity or uncertain evidence to make room: that can permit a repeated
+external action.
+
+Inspection and uncertainty boundaries:
+
+- Uncertain effects and reconciliation evidence have no automatic TTL, even
+  after authoritative resolution.
 - Operators get direct lookup by run, request, or effect ID, and a paginated
   unresolved-effects listing, independent of the latest-200 history view.
 - `ResolveUncertainEffect` is the only path that lifts a fence, and it is not
@@ -139,7 +186,7 @@ Implemented today:
   serialized. This lock is in-process, so it carries the same one-Runtime-per-
   data-directory requirement as the session lifecycle lock.
 
-Not implemented, and therefore **not** claimed:
+Intentional retention choices:
 
 - Terminal run and history payload pruning.
 - Idle-session expiry.
@@ -168,8 +215,9 @@ operation is still unresolved:
 - `creating` — a create may have produced a session that was never mapped. The
   intent carries an unguessable ownership token; the next request looks the
   session up by title and **adopts** it rather than creating a duplicate.
-- `cleanup` — a delete was issued for `remote_id` and its outcome is unknown.
-  The next request retries the delete by that known id. A session in this phase
+- `cleanup` — the remote ID is recorded before a delete is issued; its outcome
+  can be unknown.
+  The next request or explicit `Recover` retries the delete by that known id. A session in this phase
   is never returned to the adoption pool, because a late delete must not
   destroy a mapped conversation.
 
@@ -181,8 +229,18 @@ duplicate the very conversation the intent exists to recover. Several sessions
 sharing one token are ambiguous; recovery fails closed and deletes nothing,
 because a title match does not identify which candidate the intent owns.
 
-An intent that survives a committed mapping is stale and is cleared on the next
-request, so recovery can never adopt the session that mapping already owns.
+A new mapping consumes its creation intent atomically. A legacy stale intent
+that survives a committed mapping is cleared after an authoritative mapping
+lookup. An unreadable lookup preserves both the intent and remote session.
+
+Explicit `Recover` also settles existing creation and cleanup intents without
+allocating a run slot or sending a prompt. It attempts session-intent settlement
+before run interruption, so an unresolved run or failed abort cannot skip
+independent session obligations. Both recovery errors are retained. It can adopt one uniquely matching
+owned session into its reserved mapping slot, or confirm cleanup of an unreferenced
+known remote ID. Full or lowered admission limits do not block this settlement.
+An empty or ambiguous lookup remains uncertain; recovery never creates a
+replacement session or resolves consequential tool effects.
 
 **Concurrency boundary.** `Runtime.Run` holds the session lifecycle lock for
 the whole of create, adoption, mapping, and cleanup, so those phases are
@@ -221,9 +279,10 @@ that a direct OpenCode user shares. Where a direct OpenCode user shares the
 same provider account and directory, that deployment must not use this
 candidate.
 
-A blanket TTL eventually deletes either the evidence needed for recovery or the
-identity that prevents re-execution. The accepted cost is that unresolved
-evidence can grow indefinitely.
+A blanket TTL can delete evidence needed for recovery or the identity that
+prevents re-execution. The accepted cost is eventual admission refusal until
+the operator provisions a supported larger finite limit or exports the store
+for an explicit, separately reviewed maintenance operation.
 
 ## 5. `/v1/compos` is a trusted-producer contract
 
@@ -277,6 +336,8 @@ bounded per-request overhead, while history may introduce degradation that grows
 throughout a deployment's lifetime.
 
 ## Deployment obligations outside this repository
+
+These obligations remain open in [deployment validation #19](https://github.com/mrchypark/beesuh/issues/19).
 
 - **Conductor scope enforcement.** Beesuh validates owned connections and sends
   trusted scope headers; the gateway must enforce user, workspace, and

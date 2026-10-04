@@ -22,6 +22,7 @@ const (
 	FailureRateLimited           = "rate_limited"
 	FailureServiceUnavailable    = "service_unavailable"
 	FailureOverloaded            = "overloaded"
+	FailureStorageCapacity       = "storage_capacity"
 	FailureDeadlineExceeded      = "deadline_exceeded"
 	FailureUpstream              = "upstream_failure"
 )
@@ -39,6 +40,7 @@ var publicMessages = map[string]string{
 	FailureRateLimited:           "service is rate limited",
 	FailureServiceUnavailable:    "service is unavailable",
 	FailureOverloaded:            "service is overloaded",
+	FailureStorageCapacity:       "retained storage capacity is exhausted",
 	FailureDeadlineExceeded:      "request timed out",
 	FailureUpstream:              "upstream service failed",
 }
@@ -63,6 +65,8 @@ func failureCategoryFor(err error) string {
 		return FailureConnectionUnavailable
 	case errors.Is(err, ErrOverloaded):
 		return FailureOverloaded
+	case errors.Is(err, ErrCapacity):
+		return FailureStorageCapacity
 	case errors.Is(err, auth.ErrRateLimited):
 		return FailureRateLimited
 	case errors.Is(err, auth.ErrUnavailable):
@@ -137,6 +141,8 @@ func categorySentinel(category string) error {
 		return auth.ErrUnavailable
 	case FailureOverloaded:
 		return ErrOverloaded
+	case FailureStorageCapacity:
+		return ErrCapacity
 	case FailureDeadlineExceeded:
 		return context.DeadlineExceeded
 	default:

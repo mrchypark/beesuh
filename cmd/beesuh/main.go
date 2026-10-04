@@ -38,35 +38,43 @@ func run() error {
 		return err
 	}
 	var (
-		backend        = flag.String("backend", "native", "runtime backend: native or opencode")
-		openCodeURL    = flag.String("opencode-url", "http://127.0.0.1:4096", "OpenCode server URL")
-		directory      = flag.String("directory", cwd, "absolute OpenCode working directory")
-		dataDir        = flag.String("data-dir", ".beesuh", "Rhiza data directory")
-		backendID      = flag.String("backend-id", "local", "OpenCode backend identity")
-		session        = flag.String("session", "", "required logical session key")
-		composInput    = flag.Bool("compos", false, "read Compos agent outbox data from stdin")
-		message        = flag.String("message", "", "direct user message")
-		workspaceID    = flag.String("workspace", "", "workspace ID for a direct message")
-		requestID      = flag.String("request-id", "", "request ID for a direct message")
-		maxConcurrent  = flag.Int("max-concurrent", 4, "maximum concurrent sessions")
-		maxWaiting     = flag.Int("max-waiting", 32, "maximum queued requests")
-		timeout        = flag.Duration("timeout", 5*time.Minute, "maximum request duration")
-		recoverOnly    = flag.Bool("recover", false, "abort and reconcile uncertain owned sessions")
-		conductorTools = flag.Bool("conductor-tools", false, "enable configured Conductor tools")
-		providersFile  = flag.String("providers", "", "native provider registry file")
-		providerID     = flag.String("provider", "", "native provider ID from -providers")
-		modelName      = flag.String("model", os.Getenv("BEESUH_MODEL"), "native model ID, or provider/model with -backend opencode")
-		modelURL       = flag.String("model-url", os.Getenv("BEESUH_MODEL_URL"), "native OpenAI-compatible model URL")
-		system         = flag.String("system", "", "native system prompt")
-		skillsDir      = flag.String("skills-dir", "", "native skills directory")
-		memory         = flag.Bool("memory", false, "enable native durable memory")
-		maxTurns       = flag.Int("max-turns", 12, "native maximum model/tool turns")
-		maxContext     = flag.Int("max-context-bytes", 65536, "native maximum saved context bytes")
-		maxOutput      = flag.Int("max-output-tokens", 2048, "native maximum completion tokens")
-		tokenBudget    = flag.String("token-budget-policy", string(beesuh.TokenBudgetStrict), "native token budget policy: strict, advisory, or unlimited")
-		interactive    = flag.Bool("interactive", false, "read direct chat messages, one line at a time")
-		listen         = flag.String("listen", "", "serve direct chat HTTP, e.g. 127.0.0.1:8080; requires BEESUH_API_TOKEN")
-		writeTimeout   = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
+		backend             = flag.String("backend", "native", "runtime backend: native or opencode")
+		openCodeURL         = flag.String("opencode-url", "http://127.0.0.1:4096", "OpenCode server URL")
+		directory           = flag.String("directory", cwd, "absolute OpenCode working directory")
+		dataDir             = flag.String("data-dir", ".beesuh", "Rhiza data directory")
+		backendID           = flag.String("backend-id", "local", "OpenCode backend identity")
+		session             = flag.String("session", "", "required logical session key")
+		composInput         = flag.Bool("compos", false, "read Compos agent outbox data from stdin")
+		message             = flag.String("message", "", "direct user message")
+		workspaceID         = flag.String("workspace", "", "workspace ID for a direct message")
+		requestID           = flag.String("request-id", "", "request ID for a direct message")
+		maxConcurrent       = flag.Int("max-concurrent", 4, "maximum concurrent sessions")
+		maxWaiting          = flag.Int("max-waiting", 32, "maximum queued requests")
+		retainedRuns        = flag.Int("retained-runs", 10000, "maximum retained runs per workspace")
+		totalRuns           = flag.Int("retained-runs-total", 100000, "maximum retained runs in the data directory")
+		retainedSessions    = flag.Int("retained-sessions", 1000, "maximum retained sessions per workspace")
+		totalSessions       = flag.Int("retained-sessions-total", 10000, "maximum retained sessions in the data directory")
+		pendingCreates      = flag.Int("pending-session-creates", 1000, "maximum pending session creations per workspace")
+		totalCreates        = flag.Int("pending-session-creates-total", 10000, "maximum pending session creations in the data directory")
+		retainedConnections = flag.Int("retained-connections", 1000, "maximum retained connections per workspace")
+		totalConnections    = flag.Int("retained-connections-total", 10000, "maximum retained connections in the data directory")
+		timeout             = flag.Duration("timeout", 5*time.Minute, "maximum request duration")
+		recoverOnly         = flag.Bool("recover", false, "abort and reconcile uncertain owned sessions")
+		conductorTools      = flag.Bool("conductor-tools", false, "enable configured Conductor tools")
+		providersFile       = flag.String("providers", "", "native provider registry file")
+		providerID          = flag.String("provider", "", "native provider ID from -providers")
+		modelName           = flag.String("model", os.Getenv("BEESUH_MODEL"), "native model ID, or provider/model with -backend opencode")
+		modelURL            = flag.String("model-url", os.Getenv("BEESUH_MODEL_URL"), "native OpenAI-compatible model URL")
+		system              = flag.String("system", "", "native system prompt")
+		skillsDir           = flag.String("skills-dir", "", "native skills directory")
+		memory              = flag.Bool("memory", false, "enable native durable memory")
+		maxTurns            = flag.Int("max-turns", 12, "native maximum model/tool turns")
+		maxContext          = flag.Int("max-context-bytes", 65536, "native maximum saved context bytes")
+		maxOutput           = flag.Int("max-output-tokens", 2048, "native maximum completion tokens")
+		tokenBudget         = flag.String("token-budget-policy", string(beesuh.TokenBudgetStrict), "native token budget policy: strict, advisory, or unlimited")
+		interactive         = flag.Bool("interactive", false, "read direct chat messages, one line at a time")
+		listen              = flag.String("listen", "", "serve direct chat HTTP, e.g. 127.0.0.1:8080; requires BEESUH_API_TOKEN")
+		writeTimeout        = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
 	)
 	flag.Parse()
 	if !filepath.IsAbs(*directory) {
@@ -83,6 +91,10 @@ func run() error {
 		MaxConcurrent: *maxConcurrent,
 		MaxWaiting:    *maxWaiting,
 		Timeout:       *timeout,
+		Capacity: beesuh.CapacityLimits{RunsPerWorkspace: *retainedRuns, RunsGlobal: *totalRuns,
+			SessionsPerWorkspace: *retainedSessions, SessionsGlobal: *totalSessions,
+			PendingCreatesPerWorkspace: *pendingCreates, PendingCreatesGlobal: *totalCreates,
+			ConnectionsPerWorkspace: *retainedConnections, ConnectionsGlobal: *totalConnections},
 	}
 	var requestProvider string
 	switch *backend {
@@ -126,7 +138,6 @@ func run() error {
 		permissions := []opencode.PermissionRule{{Permission: "*", Pattern: "*", Action: "deny"}}
 		if *conductorTools {
 			permissions = append(permissions,
-				opencode.PermissionRule{Permission: "conductor_emit", Pattern: "*", Action: "allow"},
 				opencode.PermissionRule{Permission: "conductor_get_run", Pattern: "*", Action: "allow"},
 			)
 		}

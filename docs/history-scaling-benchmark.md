@@ -102,14 +102,13 @@ materialization.
 
 The public query uses `journal_session(workspace,session_key,seq)`, so its
 filtered order has an index. The native query filters `runs` by workspace,
-session, and state, then orders by `rowid`, but `runs` only has the primary key
-`(workspace,request_id)`. Add a contiguous migration with:
+session, and state, then orders by `rowid`. At the measured revision, `runs`
+only had the primary key `(workspace,request_id)`. Migration v9 now adds:
 
 ```sql
 CREATE INDEX runs_workspace_session_state ON runs(workspace,session_key,state)
 ```
 
-This is the smallest access-path change. The equality keys let Rhiza select the
-target session and state before it reads the newest row IDs. This benchmark did
-not change the access path because migration registration is owned by another
-concurrent change.
+The equality keys let Rhiza select the target session and state before it reads
+the newest row IDs. The numbers above measure the earlier access path. They do
+not measure the performance of the shipped index.

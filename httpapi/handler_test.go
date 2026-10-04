@@ -377,7 +377,10 @@ func TestReplayedRuntimeFailureKeepsHTTPStatusAfterReopen(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				if tc.wait {
-					time.Sleep(500 * time.Millisecond)
+					// Let the request deadline cancel an admitted provider call.
+					// Drain POST input so net/http can observe peer cancellation.
+					_, _ = io.Copy(io.Discard, r.Body)
+					<-r.Context().Done()
 					return
 				}
 				if tc.category == beesuh.FailureUpstream {
@@ -389,7 +392,7 @@ func TestReplayedRuntimeFailureKeepsHTTPStatusAfterReopen(t *testing.T) {
 			t.Cleanup(upstream.Close)
 
 			dataDir := t.TempDir()
-			opts := beesuh.Options{DataDir: dataDir, BackendID: "replay-" + tc.category, MaxConcurrent: 1, MaxWaiting: 1, Timeout: 100 * time.Millisecond,
+			opts := beesuh.Options{DataDir: dataDir, BackendID: "replay-" + tc.category, MaxConcurrent: 1, MaxWaiting: 1, Timeout: 2 * time.Second,
 				Native: &beesuh.NativeOptions{Provider: model.Config{BaseURL: upstream.URL, Model: "test"}}}
 			runtime, err := beesuh.Open(context.Background(), opts)
 			if err != nil {

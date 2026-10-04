@@ -311,6 +311,7 @@ func runGoAuthyPilot(t *testing.T, cfg goauthyPilot) {
 func quote(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 func TestGoAuthyPilotHarnessContract(t *testing.T) {
+	var mismatchUserinfoCalls atomic.Int32
 	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oidc/introspect":
@@ -335,6 +336,7 @@ func TestGoAuthyPilotHarnessContract(t *testing.T) {
 			case "outage":
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
+			case "userinfo-mismatch":
 			default:
 				claims["active"] = false
 			}
@@ -343,6 +345,7 @@ func TestGoAuthyPilotHarnessContract(t *testing.T) {
 			switch r.Header.Get("Authorization") {
 			case "Bearer positive":
 			case "Bearer userinfo-mismatch":
+				mismatchUserinfoCalls.Add(1)
 				_ = json.NewEncoder(w).Encode(map[string]any{"sub": "other-subject"})
 				return
 			default:
@@ -365,6 +368,9 @@ func TestGoAuthyPilotHarnessContract(t *testing.T) {
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+	if mismatchUserinfoCalls.Load() != 1 {
+		t.Fatalf("userinfo mismatch calls = %d, want 1", mismatchUserinfoCalls.Load())
 	}
 }
 

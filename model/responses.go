@@ -75,6 +75,9 @@ func (c *Client) completeResponses(ctx context.Context, in Request) (Response, e
 				}
 			}
 		case "function_call":
+			if item.Status != "" && item.Status != "completed" {
+				return Response{}, errors.New("model: incomplete responses function call")
+			}
 			out.Message.ToolCalls = append(out.Message.ToolCalls, ToolCall{ID: item.CallID, Type: "function", Function: FunctionCall{Name: item.Name, Arguments: item.Arguments}})
 		case "reasoning":
 			// Opaque state is retained above. It is intentionally not prompt text.
@@ -216,7 +219,12 @@ func (c *Client) postJSON(ctx context.Context, endpoint, sessionID string, body 
 	if len(b) > maxResponseBytes {
 		return errors.New("model: response exceeds 1 MiB")
 	}
-	if json.Unmarshal(b, target) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.UseNumber()
+	if decoder.Decode(target) != nil {
+		return errors.New("model: invalid JSON response")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
 		return errors.New("model: invalid JSON response")
 	}
 	return nil

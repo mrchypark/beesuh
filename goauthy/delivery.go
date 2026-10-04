@@ -75,6 +75,12 @@ type apiKeyTransport struct {
 }
 
 func (t *apiKeyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	dispatched := false
+	defer func() {
+		if !dispatched && request != nil && request.Body != nil {
+			request.Body.Close()
+		}
+	}()
 	if err := t.validDestination(request); err != nil {
 		return nil, err
 	}
@@ -94,6 +100,7 @@ func (t *apiKeyTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	copyRequest.Header.Del("Authorization")
 	copyRequest.Header.Del(t.binding.Header)
 	copyRequest.Header.Set(t.binding.Header, t.binding.Prefix+key)
+	dispatched = true
 	response, err := transport(t.provider).RoundTrip(copyRequest)
 	if err != nil {
 		return nil, auth.Sanitize(err)

@@ -1,4 +1,5 @@
 // Package opencode provides the small OpenCode HTTP API surface used by Beesuh.
+// It applies a 60-second deadline when callers do not provide one.
 package opencode
 
 import (
@@ -12,9 +13,15 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
-const maxResponseBytes = 8 << 20
+const (
+	maxResponseBytes = 8 << 20
+	// defaultTimeout bounds requests made with a deadline-less context. It is
+	// deliberately long enough for a healthy OpenCode request to start.
+	defaultTimeout = 60 * time.Second
+)
 
 type Config struct {
 	BaseURL    string
@@ -134,6 +141,25 @@ func (c *Client) GetSession(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteSession releases a remote session that Beesuh created but could not
+// track. Without it a failed local mapping insert leaks an untracked session
+// that no prompt, abort, or retention policy can ever reach. The endpoint
+// replies with a boolean that reports whether the session was removed, so a
+// false result is a failed reclaim rather than a silent success.
+func (c *Client) DeleteSession(ctx context.Context, id string) error {
+	if !validSessionID(id) {
+		return errors.New("opencode: invalid session ID")
+	}
+	var ok bool
+	if err := c.call(ctx, http.MethodDelete, "/session/"+id, nil, true, &ok); err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("opencode: delete was not accepted")
+	}
+	return nil
+}
+
 func (c *Client) Prompt(ctx context.Context, id string, p Prompt) (Message, error) {
 	if !validSessionID(id) {
 		return Message{}, errors.New("opencode: invalid session ID")
@@ -201,6 +227,32 @@ func (c *Client) Idle(ctx context.Context, id string) (bool, error) {
 	return true, nil
 }
 
+// ListSessionsByTitle returns the IDs of the sessions whose title matches
+// exactly, newest first. A session Beesuh is about to create is titled with an
+// unguessable ownership token, so an exact match is proof the session is that
+// runtime's own orphan whose create response was lost to a cancelled or expired
+// request. Without this the session would exist on the server with no local
+// record and could never be reached by ID again.
+func (c *Client) ListSessionsByTitle(ctx context.Context, title string) ([]string, error) {
+	if strings.TrimSpace(title) == "" {
+		return nil, errors.New("opencode: session title is required")
+	}
+	var out []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := c.call(ctx, http.MethodGet, "/session", nil, true, &out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out))
+	for _, s := range out {
+		if s.Title == title && validSessionID(s.ID) {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids, nil
+}
+
 func (c *Client) Health(ctx context.Context) (string, error) {
 	var out struct {
 		Healthy bool   `json:"healthy"`
@@ -216,6 +268,13 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 }
 
 func (c *Client) call(ctx context.Context, method, endpoint string, body any, directory bool, out any) error {
+	if ctx != nil {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+			defer cancel()
+		}
+	}
 	u := *c.baseURL
 	u.Path = path.Join("/", strings.TrimSuffix(c.baseURL.Path, "/"), endpoint)
 	if directory {
@@ -223,15 +282,15 @@ func (c *Client) call(ctx context.Context, method, endpoint string, body any, di
 		q.Set("directory", c.directory)
 		u.RawQuery = q.Encode()
 	}
-	var r io.Reader
+	var r io.ReadCloser
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("opencode: encode request: %w", err)
 		}
-		r = bytes.NewReader(b)
+		r = io.NopCloser(bytes.NewReader(b))
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), r)
+	req, err := newRequest(ctx, method, u.String(), r)
 	if err != nil {
 		return fmt.Errorf("opencode: build request: %w", err)
 	}
@@ -256,10 +315,21 @@ func (c *Client) call(ctx context.Context, method, endpoint string, body any, di
 	if len(b) > maxResponseBytes {
 		return errors.New("opencode: response exceeds 8 MiB")
 	}
+	if out == nil {
+		return nil
+	}
 	if err := json.Unmarshal(b, out); err != nil {
 		return fmt.Errorf("opencode: invalid JSON response: %w", err)
 	}
 	return nil
+}
+
+func newRequest(ctx context.Context, method, url string, body io.ReadCloser) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil && body != nil {
+		_ = body.Close()
+	}
+	return req, err
 }
 
 func validSessionID(id string) bool {

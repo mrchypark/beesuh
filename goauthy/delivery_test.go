@@ -14,6 +14,66 @@ import (
 	"github.com/mrchypark/beesuh/auth"
 )
 
+type trackingBody struct {
+	*strings.Reader
+	closes int
+}
+
+func (b *trackingBody) Close() error {
+	b.closes++
+	return nil
+}
+
+func TestAPIKeyTransportClosesBodyBeforeDispatch(t *testing.T) {
+	mode := ""
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch mode {
+		case "delivery":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "expired":
+			json.NewEncoder(w).Encode(map[string]any{"kind": "api_key", "api_key": "key", "grant_id": "grant", "provider_id": "model", "connection_generation": "gen", "credential_version": 1, "connector_digest": "digest", "header": "Authorization", "prefix": "", "consent_expires_at_unix_ms": time.Now().Add(-time.Second).UnixMilli()})
+		}
+	}))
+	defer issuer.Close()
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("provider request dispatched")
+	}))
+	defer provider.Close()
+	client, err := NewAPIKeyClient(issuer.URL, APIKeyBinding{GrantID: "grant", ProviderID: "model", ConnectionGeneration: "gen", CredentialVersion: 1, ConnectorDigest: "digest", Header: "Authorization", Endpoint: provider.URL + "/chat"}, func(context.Context) (string, error) {
+		if mode == "source" {
+			return "", errors.New("source failed")
+		}
+		return "human", nil
+	}, issuer.Client(), provider.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "destination", path: "/other"},
+		{name: "source", path: "/chat"},
+		{name: "delivery", path: "/chat"},
+		{name: "expired", path: "/chat"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mode = test.name
+			body := &trackingBody{Reader: strings.NewReader("payload")}
+			request, err := http.NewRequest(http.MethodPost, provider.URL+test.path, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Transport.RoundTrip(request); err == nil {
+				t.Fatal("pre-dispatch failure succeeded")
+			}
+			if body.closes != 1 {
+				t.Fatalf("body closes = %d, want 1", body.closes)
+			}
+		})
+	}
+}
+
 func TestAPIKeyClientFetchesPerRequestAndDoesNotForwardBearer(t *testing.T) {
 	var issuerCalls, providerCalls atomic.Int32
 	response := func(key, grant string) map[string]any {

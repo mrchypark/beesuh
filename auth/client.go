@@ -45,6 +45,10 @@ func cloneClient(base *http.Client) *http.Client {
 	}
 	clientCopy := *base
 	client := &clientCopy
+	// A nil jar neither stores nor sends cookies. Authenticated clients must not
+	// inherit shared cookie state from their base client. Integrations that need
+	// cookies must create a jar scoped to one connection.
+	client.Jar = nil
 	if client.Timeout <= 0 {
 		client.Timeout = defaultTimeout
 	}
@@ -107,7 +111,15 @@ type oauthTransport struct {
 
 func (t *oauthTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	copyToken, err := t.token(request.Context())
+	if err == nil && !copyToken.Valid() {
+		err = ErrInvalidCredentials
+	}
 	if err != nil {
+		// http.Client closes request bodies after RoundTrip errors. Direct
+		// RoundTrip callers bypass that wrapper, so close before returning here.
+		if request.Body != nil {
+			_ = request.Body.Close()
+		}
 		return nil, err
 	}
 

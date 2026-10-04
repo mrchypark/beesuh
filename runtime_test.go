@@ -2,6 +2,7 @@ package beesuh
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,23 +21,60 @@ type fakeOpenCode struct {
 	mu        sync.Mutex
 	next      int
 	creates   int
+	deletes   int
 	prompts   int
 	aborts    int
 	active    int
 	maxActive int
 
-	promptGate  chan struct{}
-	prompted    chan struct{}
-	abortGate   chan struct{}
-	aborted     chan struct{}
-	abortOK     bool
+	promptGate chan struct{}
+	prompted   chan struct{}
+	abortGate  chan struct{}
+	aborted    chan struct{}
+	abortOK    bool
+	// abortFail names session IDs whose abort must be refused, which reproduces
+	// a recovery pass that stops on one workspace after persisting another.
+	abortFail   map[string]bool
 	promptCode  int
 	promptReply string
+	deleteCode  int
+	deleteOK    bool
+	// createCode, when non-zero, makes session creation fail with that status
+	// after recording the session, which reproduces a lost create response.
+	createCode int
+
+	// createGate, when non-nil, blocks the session create response until it is
+	// closed. It lets a test drive the request context to cancellation between
+	// the remote session existing and the local mapping insert running. The
+	// response headers are flushed before the wait, so the client already has a
+	// fully formed response and only the body read is interrupted.
+	createGate chan struct{}
+	created    chan struct{}
+	// createAfterHeader, when non-nil, is closed by the fake after the create
+	// response headers are flushed. A request context cancelled after that point
+	// makes the client lose the response body while the server has already
+	// created the session, which is the worst-case orphan shape.
+	createAfterHeader chan struct{}
+	// deleted receives one value per DELETE the fake accepted, so tests can wait
+	// for the reclaim instead of sleeping.
+	deleted chan struct{}
+
+	// sessionTitles mirrors the sessions that exist on the fake server so the
+	// list endpoint can answer title lookups the way OpenCode does.
+	sessionTitles map[string]string
+	// promptTargets records which session each prompt was sent to, so a test can
+	// prove a session was never written into rather than inferring it from counts.
+	promptTargets []string
+}
+
+type fakeSession struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 func newFakeOpenCode(t *testing.T) *fakeOpenCode {
 	t.Helper()
-	f := &fakeOpenCode{prompted: make(chan struct{}, 32), aborted: make(chan struct{}, 32), abortOK: true}
+	f := &fakeOpenCode{prompted: make(chan struct{}, 32), aborted: make(chan struct{}, 32), created: make(chan struct{}, 32), deleted: make(chan struct{}, 32), sessionTitles: map[string]string{}, abortOK: true, deleteOK: true}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
 	t.Cleanup(f.server.Close)
 	return f
@@ -52,12 +90,84 @@ func (f *fakeOpenCode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		f.next++
 		f.creates++
 		id := fmt.Sprintf("ses_%d", f.next)
+		gate := f.createGate
+		afterHeader := f.createAfterHeader
+		if afterHeader != nil {
+			// Fire only on the first create; later creates behave normally.
+			f.createAfterHeader = nil
+		}
+		var title string
+		if strings.HasPrefix(r.URL.Path, "/session") {
+			var body struct {
+				Title string `json:"title"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			title = body.Title
+		}
+		f.sessionTitles[id] = title
+		code := f.createCode
+		if code != 0 {
+			f.createCode = 0
+			f.mu.Unlock()
+			f.created <- struct{}{}
+			http.Error(w, "create failed", code)
+			return
+		}
 		f.mu.Unlock()
+		f.created <- struct{}{}
+		if gate != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			<-gate
+		}
+		if afterHeader != nil {
+			select {
+			case <-afterHeader:
+			default:
+				close(afterHeader)
+			}
+			<-r.Context().Done()
+			// The client is gone, but the session exists on the server. This is
+			// the untracked-orphan shape the runtime has to be able to rule out.
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/session/status" {
 		_, _ = w.Write([]byte(`{}`)) // OpenCode omits idle sessions.
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/session" {
+		f.mu.Lock()
+		titles := make([]fakeSession, 0, len(f.sessionTitles))
+		for id, title := range f.sessionTitles {
+			titles = append(titles, fakeSession{ID: id, Title: title})
+		}
+		f.mu.Unlock()
+		body, _ := json.Marshal(titles)
+		_, _ = w.Write(body)
+		return
+	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/session/") {
+		deletedID := strings.TrimPrefix(r.URL.Path, "/session/")
+		f.mu.Lock()
+		f.deletes++
+		code := f.deleteCode
+		ok := f.deleteOK
+		if ok {
+			delete(f.sessionTitles, deletedID)
+		}
+		f.mu.Unlock()
+		f.deleted <- struct{}{}
+		if code != 0 {
+			http.Error(w, "delete failed", code)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `%t`, ok)
 		return
 	}
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/session/") {
@@ -66,8 +176,10 @@ func (f *fakeOpenCode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/message") {
+		target := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/message")
 		f.mu.Lock()
 		f.prompts++
+		f.promptTargets = append(f.promptTargets, target)
 		f.active++
 		if f.active > f.maxActive {
 			f.maxActive = f.active
@@ -100,9 +212,11 @@ func (f *fakeOpenCode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/abort") {
+		target := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/abort")
 		f.mu.Lock()
 		f.aborts++
 		gate, ok := f.abortGate, f.abortOK
+		fail := f.abortFail[target]
 		f.mu.Unlock()
 		f.aborted <- struct{}{}
 		if gate != nil {
@@ -112,7 +226,7 @@ func (f *fakeOpenCode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		_, _ = fmt.Fprintf(w, "%t", ok)
+		_, _ = fmt.Fprintf(w, "%t", ok && !fail)
 		return
 	}
 	http.NotFound(w, r)
@@ -150,6 +264,15 @@ func openTestRuntimeWithPermissions(t *testing.T, f *fakeOpenCode, dataDir strin
 
 func testRequest(session, request, text string) Request {
 	return Request{WorkspaceID: "workspace", SessionKey: session, RequestID: request, Prompt: opencode.Prompt{Text: text}}
+}
+
+// runFenced reports whether this runtime holds a volatile run fence. It reads
+// the map directly because Status is refused in service mode, and these call
+// sites assert only that a failed operation left no run fence behind.
+func runFencedNow(r *Runtime) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.runFenced) != 0
 }
 
 func receive(t *testing.T, ch <-chan struct{}, name string) {
@@ -386,6 +509,81 @@ func TestRuntimeUncertainRequiresRecovery(t *testing.T) {
 	}
 	if creates, prompts, aborts := f.counts(); creates != 1 || prompts != 2 || aborts != 2 {
 		t.Fatalf("creates=%d prompts=%d aborts=%d", creates, prompts, aborts)
+	}
+}
+
+// An unresolved run must not deny service to an unrelated workspace. The old
+// runtime-wide flag made workspace A's stuck run refuse every request in
+// workspace B, which is a cross-tenant denial-of-service primitive.
+func TestRuntimeUncertainWorkspaceDoesNotBlockAnotherWorkspace(t *testing.T) {
+	f := newFakeOpenCode(t)
+	f.promptCode = http.StatusInternalServerError
+	f.abortOK = false
+	r := openTestRuntime(t, f, t.TempDir(), 1)
+	t.Cleanup(func() { _ = r.Close() })
+
+	stuck := testRequest("agent", "original", "one")
+	if _, err := r.Run(context.Background(), stuck); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("first error = %v", err)
+	}
+
+	// A different workspace must still be served while the first one awaits
+	// recovery. Its request succeeds because the fence is workspace-scoped.
+	f.mu.Lock()
+	f.promptCode = 0
+	f.mu.Unlock()
+	other := Request{WorkspaceID: "other-workspace", SessionKey: "agent", RequestID: "other", Prompt: opencode.Prompt{Text: "two"}}
+	if _, err := r.Run(context.Background(), other); err != nil {
+		t.Fatalf("unrelated workspace was blocked: %v", err)
+	}
+	// The fenced workspace is still refused, so the fix did not weaken it.
+	if _, err := r.Run(context.Background(), testRequest("agent", "later", "three")); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("fenced workspace error = %v", err)
+	}
+}
+
+// A create intent records the configuration that was live when the attempt
+// started. Adopting that session under different OpenCode permissions would
+// prompt an orphan created with the old permissions as if the new profile
+// owned it, so the intent must be refused before adoption.
+func TestPendingCreateIntentIsRefusedAfterProfileChange(t *testing.T) {
+	f := newFakeOpenCode(t)
+	data := t.TempDir()
+	open := func(permissions []opencode.PermissionRule) *Runtime {
+		return openTestRuntimeWithPermissions(t, f, data, 1, permissions)
+	}
+	r := open(nil)
+	if _, _, _, _, err := r.pendingCreateToken(context.Background(), testRequest("session", "request", "text")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with different permissions. The surviving intent describes a
+	// session created under the old profile, so adoption must refuse it.
+	r = open([]opencode.PermissionRule{{Permission: "bash", Pattern: "deploy", Action: "allow"}})
+	t.Cleanup(func() { _ = r.Close() })
+	if _, _, _, resumed, err := r.pendingCreateToken(context.Background(), testRequest("session", "request", "text")); !errors.Is(err, ErrConflict) || resumed {
+		t.Fatalf("resumed=%v err=%v, want ErrConflict", resumed, err)
+	}
+	// The intent survives the refusal: it is the only evidence of a session
+	// that may exist, so a rejected lookup must not discard it.
+	if _, err := r.query(context.Background(), `SELECT ownership_token FROM pending_session_creates WHERE workspace=? AND session_key=?`, "workspace", "session"); err != nil {
+		t.Fatal(err)
+	}
+	// A directory change is equally incompatible, and must not be adopted.
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := Open(context.Background(), Options{DataDir: data, BackendID: "test", MaxConcurrent: 1, MaxWaiting: 4, Timeout: 2 * time.Second,
+		OpenCode: opencode.Config{BaseURL: f.server.URL, Directory: "/somewhere-else"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r2.Close() })
+	if _, _, _, resumed, err := r2.pendingCreateToken(context.Background(), testRequest("session", "request", "text")); !errors.Is(err, ErrConflict) || resumed {
+		t.Fatalf("directory change: resumed=%v err=%v, want ErrConflict", resumed, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mrchypark/rhiza"
 )
@@ -20,6 +21,7 @@ type Connection struct {
 	CredentialRef string `json:"-"`
 	State         string `json:"state"`
 	Generation    int64  `json:"generation"`
+	Revocation    string `json:"revocation,omitempty"`
 }
 
 var connectionMigration = rhiza.Migration{Version: 3, Name: "connections", Statements: []rhiza.SQLStatement{
@@ -31,6 +33,24 @@ var connectionCredentialMigration = rhiza.Migration{Version: 5, Name: "connectio
 	{SQL: `ALTER TABLE connections ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''`},
 	{SQL: `ALTER TABLE connections ADD COLUMN generation INTEGER NOT NULL DEFAULT 1`},
 }}
+
+var connectionRevocationMigration = rhiza.Migration{Version: 8, Name: "connection-revocations", Statements: []rhiza.SQLStatement{
+	{SQL: `CREATE TABLE connection_revocations (connection_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','confirmed','unavailable')))`},
+}}
+
+// connectionRevocationBackfillMigration closes the upgrade gap from versions
+// that persisted revoked connections before revocation confirmations existed.
+// Those connections are already locally terminal, so retries must not call a
+// host revoker again.
+var connectionRevocationBackfillMigration = rhiza.Migration{Version: 11, Name: "connection-revocation-backfill", Statements: []rhiza.SQLStatement{
+	{SQL: `INSERT INTO connection_revocations(connection_id,generation,state)
+SELECT id,generation,'confirmed' FROM connections WHERE state='revoked'
+ON CONFLICT(connection_id) DO NOTHING`},
+}}
+
+var ErrRevocationPending = errors.New("beesuh: external connection revocation is pending")
+
+const defaultRevocationTimeout = 30 * time.Second
 
 func validConnectionText(s string) bool {
 	return strings.TrimSpace(s) != "" && len(s) <= 256 && !strings.ContainsAny(s, "\x00\r\n")
@@ -56,6 +76,9 @@ func validateConnection(c Connection) error {
 // intentionally not principal-scoped: only the service's trusted setup path
 // should call it. Credentials remain with the corresponding adapter.
 func (r *Runtime) RegisterConnection(ctx context.Context, c Connection) error {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -108,6 +131,9 @@ func (r *Runtime) RegisterConnection(ctx context.Context, c Connection) error {
 // TargetID is intentionally omitted from JSON so callers cannot treat this as
 // a credential or routing configuration endpoint.
 func (r *Runtime) Connections(ctx context.Context) ([]Connection, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return nil, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -117,7 +143,7 @@ func (r *Runtime) Connections(ctx context.Context) ([]Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.query(ctx, `SELECT id,user_id,workspace_id,kind,target_id,credential_ref,state,generation FROM connections WHERE user_id=? AND workspace_id=? ORDER BY id`, p.UserID, p.WorkspaceID)
+	rows, err := r.query(ctx, `SELECT c.id,c.user_id,c.workspace_id,c.kind,c.target_id,c.credential_ref,c.state,c.generation,COALESCE(v.state,'') FROM connections c LEFT JOIN connection_revocations v ON v.connection_id=c.id WHERE c.user_id=? AND c.workspace_id=? ORDER BY c.id`, p.UserID, p.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +156,9 @@ func (r *Runtime) Connections(ctx context.Context) ([]Connection, error) {
 
 // Connection returns a ready connection owned by the authenticated principal.
 func (r *Runtime) Connection(ctx context.Context, id string) (Connection, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return Connection{}, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -141,40 +170,140 @@ func (r *Runtime) Connection(ctx context.Context, id string) (Connection, error)
 // SetConnectionState changes an owned connection's state. A revoked
 // connection is terminal and must be provisioned under a fresh ID.
 func (r *Runtime) SetConnectionState(ctx context.Context, id, state string) error {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return err
+	}
 	r.life.RLock()
-	defer r.life.RUnlock()
 	if r.closed {
+		r.life.RUnlock()
 		return ErrClosed
 	}
 	if state != "ready" && state != "needs_login" && state != "revoked" {
+		r.life.RUnlock()
 		return errors.Join(ErrInvalidInput, errors.New("beesuh: invalid connection state"))
 	}
 	unlock, err := r.lockSession(ctx, "connection\x00"+id)
 	if err != nil {
+		r.life.RUnlock()
 		return err
 	}
-	defer unlock()
 	c, err := r.ownedConnection(ctx, id)
 	if err != nil {
+		unlock()
+		r.life.RUnlock()
 		return err
 	}
 	if c.State == "revoked" {
+		unlock()
+		r.life.RUnlock()
 		if state == "revoked" {
-			return nil
+			return r.revokeCredential(ctx, c)
 		}
 		return errors.Join(ErrConnectionUnavailable, errors.New("beesuh: revoked connection cannot be reactivated"))
 	}
 	if c.State == state {
+		unlock()
+		r.life.RUnlock()
 		return nil
 	}
 	// Readiness requires the service adapter to confirm an authenticated account;
 	// ownership alone cannot reactivate an unresolved credential reference.
 	if state == "ready" {
 		if _, err := r.resolveCredential(ctx, c); err != nil {
+			unlock()
+			r.life.RUnlock()
 			return err
 		}
 	}
-	return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `UPDATE connections SET state=?,generation=generation+1 WHERE id=? AND user_id=? AND workspace_id=?`, Args: []any{state, c.ID, c.UserID, c.WorkspaceID}, ExpectedRowsAffected: one()}})
+	if state != "revoked" {
+		err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `UPDATE connections SET state=?,generation=generation+1 WHERE id=? AND user_id=? AND workspace_id=?`, Args: []any{state, c.ID, c.UserID, c.WorkspaceID}, ExpectedRowsAffected: one()}})
+		unlock()
+		r.life.RUnlock()
+		return err
+	}
+	err = r.mutate(ctx, []rhiza.SQLStatement{
+		{SQL: `INSERT INTO connection_revocations(connection_id,generation,state) VALUES(?,?,'pending')`, Args: []any{c.ID, c.Generation + 1}},
+		{SQL: `UPDATE connections SET state='revoked',generation=generation+1 WHERE id=? AND user_id=? AND workspace_id=?`, Args: []any{c.ID, c.UserID, c.WorkspaceID}, ExpectedRowsAffected: one()},
+	})
+	unlock()
+	r.life.RUnlock()
+	if err != nil {
+		return err
+	}
+	c.State, c.Generation, c.Revocation = "revoked", c.Generation+1, "pending"
+	return r.revokeCredential(ctx, c)
+}
+
+// revokeCredential runs after local denial has committed and the connection
+// lock has been released. Hosts must make this callback idempotent per ID and
+// generation because an interrupted confirmation is retried.
+func (r *Runtime) revokeCredential(ctx context.Context, c Connection) error {
+	if c.Revocation == "confirmed" || c.Revocation == "unavailable" {
+		return nil
+	}
+	// This guard serializes retries for one connection. It is deliberately
+	// separate from the connection lock, which is released before the callback.
+	unlock, err := r.lockSession(ctx, "connection-revocation\x00"+c.ID)
+	if err != nil {
+		return ErrRevocationPending
+	}
+	defer unlock()
+	r.life.RLock()
+	if r.closed {
+		r.life.RUnlock()
+		return ErrRevocationPending
+	}
+	current, err := r.ownedConnection(ctx, c.ID)
+	r.life.RUnlock()
+	if err != nil {
+		return ErrRevocationPending
+	}
+	if current.Revocation == "confirmed" || current.Revocation == "unavailable" {
+		return nil
+	}
+	c = current
+	if r.opts.RevokeCredential == nil {
+		if err := r.setRevocationState(ctx, c, "unavailable"); err != nil {
+			return ErrRevocationPending
+		}
+		return nil
+	}
+	timeout := r.opts.RevocationTimeout
+	if timeout == 0 {
+		timeout = defaultRevocationTimeout
+	}
+	if timeout < 0 {
+		return ErrRevocationPending
+	}
+	revokeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := r.opts.RevokeCredential(revokeCtx, c); err != nil {
+		return ErrRevocationPending
+	}
+	// A callback can ignore its context and return nil after its deadline. In
+	// that case the runtime cannot prove whether the remote revocation took
+	// effect before the deadline, so retain the durable pending state.
+	if err := revokeCtx.Err(); err != nil {
+		return ErrRevocationPending
+	}
+	if err := r.setRevocationState(ctx, c, "confirmed"); err != nil {
+		return ErrRevocationPending
+	}
+	return nil
+}
+
+func (r *Runtime) setRevocationState(ctx context.Context, c Connection, state string) error {
+	r.life.RLock()
+	defer r.life.RUnlock()
+	if r.closed {
+		return ErrClosed
+	}
+	unlock, err := r.lockSession(ctx, "connection\x00"+c.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return r.mutate(ctx, []rhiza.SQLStatement{{SQL: `UPDATE connection_revocations SET state=? WHERE connection_id=? AND generation=? AND state='pending'`, Args: []any{state, c.ID, c.Generation}, ExpectedRowsAffected: one()}})
 }
 
 // checkConnection is used by execution paths while they already hold life.
@@ -208,7 +337,7 @@ func (r *Runtime) ownedConnection(ctx context.Context, id string) (Connection, e
 	if err != nil {
 		return Connection{}, err
 	}
-	rows, err := r.query(ctx, `SELECT id,user_id,workspace_id,kind,target_id,credential_ref,state,generation FROM connections WHERE id=? AND user_id=? AND workspace_id=?`, id, p.UserID, p.WorkspaceID)
+	rows, err := r.query(ctx, `SELECT c.id,c.user_id,c.workspace_id,c.kind,c.target_id,c.credential_ref,c.state,c.generation,COALESCE(v.state,'') FROM connections c LEFT JOIN connection_revocations v ON v.connection_id=c.id WHERE c.id=? AND c.user_id=? AND c.workspace_id=?`, id, p.UserID, p.WorkspaceID)
 	if err != nil {
 		return Connection{}, err
 	}
@@ -219,7 +348,7 @@ func (r *Runtime) ownedConnection(ctx context.Context, id string) (Connection, e
 }
 
 func connectionFromFullRow(row []any) Connection {
-	return Connection{ID: row[0].(string), UserID: row[1].(string), WorkspaceID: row[2].(string), Kind: row[3].(string), TargetID: row[4].(string), CredentialRef: row[5].(string), State: row[6].(string), Generation: row[7].(int64)}
+	return Connection{ID: row[0].(string), UserID: row[1].(string), WorkspaceID: row[2].(string), Kind: row[3].(string), TargetID: row[4].(string), CredentialRef: row[5].(string), State: row[6].(string), Generation: row[7].(int64), Revocation: row[8].(string)}
 }
 
 func connectionFromRow(id string, row []any) Connection {

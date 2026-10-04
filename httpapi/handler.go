@@ -10,21 +10,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mrchypark/beesuh"
 	"github.com/mrchypark/beesuh/auth"
 	"github.com/mrchypark/beesuh/compos"
 )
 
-const maxBodyBytes = 256 << 10
+const (
+	maxBodyBytes         = 256 << 10
+	responseWriteTimeout = 5 * time.Second
+)
+
+// WriteBudget is the per-response write deadline the handler applies after
+// long-running work returns. A server-level WriteTimeout must exceed the whole
+// request budget and this value, or it cuts off a legitimate response.
+const WriteBudget = responseWriteTimeout
 
 type handler struct {
-	runtime      *beesuh.Runtime
-	token        [sha256.Size]byte
-	authenticate func(*http.Request) (beesuh.Principal, error)
-	identity     bool
+	runtime        *beesuh.Runtime
+	token          [sha256.Size]byte
+	authenticate   func(*http.Request) (beesuh.Principal, error)
+	composProducer func(context.Context, beesuh.Principal) error
+	identity       bool
 }
 
 type chatRequest struct {
@@ -38,7 +50,8 @@ type chatRequest struct {
 }
 
 // New returns the direct user conversation API. The token must be supplied as
-// an HTTP Authorization header using the Bearer scheme.
+// an HTTP Authorization header using the Bearer scheme. It does not permit
+// Compos executions.
 func New(runtime *beesuh.Runtime, token string) (http.Handler, error) {
 	if runtime == nil {
 		return nil, errors.New("httpapi: runtime is required")
@@ -54,8 +67,23 @@ func New(runtime *beesuh.Runtime, token string) (http.Handler, error) {
 
 // NewAuthenticated exposes the user-facing API behind the service's existing
 // authentication. The callback is the only identity boundary: request bodies
-// and headers never establish a user or workspace.
+// and headers never establish a user or workspace. It does not permit Compos
+// executions.
 func NewAuthenticated(runtime *beesuh.Runtime, authenticate func(*http.Request) (beesuh.Principal, error)) (http.Handler, error) {
+	return newAuthenticated(runtime, authenticate, nil)
+}
+
+// NewAuthenticatedWithComposProducer exposes the service API and permits
+// /v1/compos only when authorizeCompos authorizes the authenticated producer.
+// The callback must check the principal's current producer permission.
+func NewAuthenticatedWithComposProducer(runtime *beesuh.Runtime, authenticate func(*http.Request) (beesuh.Principal, error), authorizeCompos func(context.Context, beesuh.Principal) error) (http.Handler, error) {
+	if authorizeCompos == nil {
+		return nil, errors.New("httpapi: Compos producer authorization callback is required")
+	}
+	return newAuthenticated(runtime, authenticate, authorizeCompos)
+}
+
+func newAuthenticated(runtime *beesuh.Runtime, authenticate func(*http.Request) (beesuh.Principal, error), composProducer func(context.Context, beesuh.Principal) error) (http.Handler, error) {
 	if runtime == nil {
 		return nil, errors.New("httpapi: runtime is required")
 	}
@@ -65,7 +93,7 @@ func NewAuthenticated(runtime *beesuh.Runtime, authenticate func(*http.Request) 
 	if authenticate == nil {
 		return nil, errors.New("httpapi: authentication callback is required")
 	}
-	return newHandler(handler{runtime: runtime, authenticate: authenticate, identity: true}), nil
+	return newHandler(handler{runtime: runtime, authenticate: authenticate, composProducer: composProducer, identity: true}), nil
 }
 
 func newHandler(h handler) http.Handler {
@@ -78,21 +106,20 @@ func newHandler(h handler) http.Handler {
 	mux.HandleFunc("GET /v1/runs/{request_id}", h.run)
 	mux.HandleFunc("GET /v1/connections", h.connections)
 	mux.HandleFunc("DELETE /v1/connections/{connection_id}", h.revokeConnection)
-	return h.authenticated(mux)
+	return responseWriteDeadline(h.authenticated(mux), responseWriteTimeout)
 }
 
 func (h handler) chat(w http.ResponseWriter, r *http.Request) {
 	in, err := decode(r.Body)
 	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, errBodyTooLarge) {
-			status = http.StatusRequestEntityTooLarge
+		if !errors.Is(err, errBodyTooLarge) {
+			err = errors.Join(beesuh.ErrInvalidInput, err)
 		}
-		h.write(w, status, beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	if err := validate(in); err != nil {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, errors.Join(beesuh.ErrInvalidInput, err), beesuh.Result{State: "failed"})
 		return
 	}
 	out, err := h.runtime.Run(r.Context(), beesuh.Request{
@@ -108,40 +135,45 @@ func (h handler) chat(w http.ResponseWriter, r *http.Request) {
 		if out.State == "" {
 			out.State = "failed"
 		}
-		if out.Error == "" {
-			out.Error = err.Error()
-		}
+		h.fail(w, err, out)
+		return
 	}
-	h.write(w, errorStatus(err), out)
+	h.write(w, http.StatusOK, out)
 }
 
 func (h handler) compos(w http.ResponseWriter, r *http.Request) {
+	producer, ok := beesuh.PrincipalFromContext(r.Context())
+	if !h.identity || !ok || h.composProducer == nil || h.composProducer(r.Context(), producer) != nil {
+		h.fail(w, beesuh.ErrForbidden, beesuh.Result{State: "failed"})
+		return
+	}
 	query := r.URL.Query()
 	session, provider := query.Get("session_key"), query.Get("provider")
 	connection, conductorConnection := query.Get("connection_id"), query.Get("conductor_connection_id")
 	if !validComposQuery(query) || !validID(session) || (provider != "" && !validID(provider)) || (connection != "" && !validID(connection)) || (conductorConnection != "" && !validID(conductorConnection)) {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: "httpapi: session_key query parameter is required"})
+		h.fail(w, beesuh.ErrInvalidInput, beesuh.Result{State: "failed"})
 		return
 	}
 	in, err := compos.Decode(r.Body, session)
 	if err != nil {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, errors.Join(beesuh.ErrInvalidInput, err), beesuh.Result{State: "failed"})
 		return
 	}
 	in.Provider = provider
 	in.ConnectionID = connection
 	in.ConductorConnectionID = conductorConnection
 	out, err := h.runtime.Run(r.Context(), in)
-	if err != nil && out.Error == "" {
-		out.State, out.Error = "failed", err.Error()
+	if err != nil {
+		h.fail(w, err, out)
+		return
 	}
-	h.write(w, errorStatus(err), out)
+	h.write(w, http.StatusOK, out)
 }
 
 func (h handler) providers(w http.ResponseWriter, r *http.Request) {
 	out, err := h.runtime.Providers(r.Context())
 	if err != nil {
-		h.write(w, errorStatus(err), beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, out)
@@ -154,7 +186,7 @@ func (h handler) status(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.runtime.Status(r.Context())
 	if err != nil {
-		h.write(w, errorStatus(err), beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, out)
@@ -164,12 +196,12 @@ func (h handler) history(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	workspace, session := query.Get("workspace_id"), query.Get("session_key")
 	if len(query) != 2 || len(query["workspace_id"]) != 1 || len(query["session_key"]) != 1 || !validID(workspace) || !validID(session) {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: "httpapi: workspace_id and session_key are required"})
+		h.fail(w, beesuh.ErrInvalidInput, beesuh.Result{State: "failed"})
 		return
 	}
 	out, err := h.runtime.History(r.Context(), workspace, session)
 	if err != nil {
-		h.write(w, errorStatus(err), beesuh.Result{State: "failed", Error: err.Error()})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, out)
@@ -179,15 +211,16 @@ func (h handler) run(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	workspace, requestID := query.Get("workspace_id"), r.PathValue("request_id")
 	if len(query) != 1 || len(query["workspace_id"]) != 1 || !validID(workspace) || !validID(requestID) {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: "httpapi: workspace_id and request_id are required"})
+		h.fail(w, beesuh.ErrInvalidInput, beesuh.Result{State: "failed"})
 		return
 	}
 	out, err := h.runtime.GetRun(r.Context(), workspace, requestID)
 	if err != nil {
-		if out.Error == "" {
-			out.State, out.Error = "failed", err.Error()
-		}
-		h.write(w, errorStatus(err), out)
+		h.fail(w, err, out)
+		return
+	}
+	if out.Error != "" {
+		h.fail(w, storedFailure(out.FailureCategory), out)
 		return
 	}
 	h.write(w, http.StatusOK, out)
@@ -196,7 +229,7 @@ func (h handler) run(w http.ResponseWriter, r *http.Request) {
 func (h handler) connections(w http.ResponseWriter, r *http.Request) {
 	out, err := h.runtime.Connections(r.Context())
 	if err != nil {
-		h.write(w, errorStatus(err), beesuh.Result{State: "failed", Error: publicError(err)})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, out)
@@ -205,11 +238,11 @@ func (h handler) connections(w http.ResponseWriter, r *http.Request) {
 func (h handler) revokeConnection(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("connection_id")
 	if !validID(id) {
-		h.write(w, http.StatusBadRequest, beesuh.Result{State: "failed", Error: "httpapi: connection_id is required"})
+		h.fail(w, beesuh.ErrInvalidInput, beesuh.Result{State: "failed"})
 		return
 	}
 	if err := h.runtime.SetConnectionState(r.Context(), id, "revoked"); err != nil {
-		h.write(w, errorStatus(err), beesuh.Result{State: "failed", Error: publicError(err)})
+		h.fail(w, err, beesuh.Result{State: "failed"})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, map[string]string{"connection_id": id, "state": "revoked"})
@@ -315,45 +348,101 @@ func validID(value string) bool {
 	return strings.TrimSpace(value) != "" && len(value) <= 256 && !strings.ContainsRune(value, 0)
 }
 
-func errorStatus(err error) int {
+type publicFailure struct {
+	code    string
+	message string
+	status  int
+}
+
+func publicFailureFor(err error) publicFailure {
 	if err == nil {
-		return http.StatusOK
+		return publicFailure{status: http.StatusOK}
 	}
 	switch {
-	case errors.Is(err, beesuh.ErrInvalidInput):
+	case errors.Is(err, errBodyTooLarge):
+		return publicFailure{code: "request_too_large", message: "request body is too large", status: http.StatusRequestEntityTooLarge}
+	}
+	// The runtime owns the bounded category set so an initial failure and a
+	// replayed one cannot drift apart.
+	category := beesuh.FailureCategory(err)
+	return publicFailure{code: category, message: beesuh.PublicFailureMessage(category), status: failureStatus(category)}
+}
+
+func failureStatus(category string) int {
+	switch category {
+	case beesuh.FailureInvalidInput:
 		return http.StatusBadRequest
-	case errors.Is(err, beesuh.ErrNotFound):
+	case beesuh.FailureNotFound:
 		return http.StatusNotFound
-	case errors.Is(err, beesuh.ErrConflict), errors.Is(err, beesuh.ErrUncertain):
+	case beesuh.FailureRequestConflict, beesuh.FailureConnectionUnavailable:
 		return http.StatusConflict
-	case errors.Is(err, beesuh.ErrUnauthenticated):
+	case beesuh.FailureUnauthorized:
 		return http.StatusUnauthorized
-	case errors.Is(err, beesuh.ErrForbidden):
+	case beesuh.FailureForbidden:
 		return http.StatusForbidden
-	case errors.Is(err, beesuh.ErrConnectionUnavailable):
-		return http.StatusConflict
-	case errors.Is(err, auth.ErrUnavailable):
+	case beesuh.FailureRateLimited, beesuh.FailureOverloaded:
+		return http.StatusTooManyRequests
+	case beesuh.FailureServiceUnavailable:
 		return http.StatusServiceUnavailable
-	case errors.Is(err, auth.ErrRateLimited):
-		return http.StatusTooManyRequests
-	case errors.Is(err, beesuh.ErrOverloaded):
-		return http.StatusTooManyRequests
-	case errors.Is(err, context.DeadlineExceeded):
+	case beesuh.FailureDeadlineExceeded:
 		return http.StatusGatewayTimeout
 	default:
 		return http.StatusBadGateway
 	}
 }
 
-func publicError(err error) string {
-	if errors.Is(err, beesuh.ErrUnauthenticated) || errors.Is(err, beesuh.ErrForbidden) {
-		return "authorization required"
+// storedFailure restores the runtime's bounded category after a completed run
+// is read from storage. The stored error message is deliberately not parsed.
+func storedFailure(category string) error {
+	switch category {
+	case beesuh.FailureInvalidInput:
+		return beesuh.ErrInvalidInput
+	case beesuh.FailureNotFound:
+		return beesuh.ErrNotFound
+	case beesuh.FailureRequestConflict:
+		return beesuh.ErrConflict
+	case beesuh.FailureUnauthorized:
+		return beesuh.ErrUnauthenticated
+	case beesuh.FailureForbidden:
+		return beesuh.ErrForbidden
+	case beesuh.FailureConnectionUnavailable:
+		return beesuh.ErrConnectionUnavailable
+	case beesuh.FailureRateLimited:
+		return auth.ErrRateLimited
+	case beesuh.FailureServiceUnavailable:
+		return auth.ErrUnavailable
+	case beesuh.FailureOverloaded:
+		return beesuh.ErrOverloaded
+	case beesuh.FailureDeadlineExceeded:
+		return context.DeadlineExceeded
+	default:
+		return beesuh.ErrUpstream
 	}
-	return err.Error()
+}
+
+func errorStatus(err error) int { return publicFailureFor(err).status }
+
+func publicError(err error) string {
+	return publicFailureFor(err).message
 }
 
 func (h handler) write(w http.ResponseWriter, status int, out beesuh.Result) {
 	h.writeJSON(w, status, out)
+}
+
+type errorResult struct {
+	beesuh.Result
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+func (h handler) fail(w http.ResponseWriter, err error, out beesuh.Result) {
+	failure := publicFailureFor(err)
+	slog.Error("httpapi request failed", "code", failure.code, "error", err)
+	if out.State == "" {
+		out.State = "failed"
+	}
+	out.Error = failure.message
+	h.writeJSON(w, failure.status, errorResult{Result: out, ErrorCode: failure.code})
 }
 
 func (h handler) writeJSON(w http.ResponseWriter, status int, out any) {
@@ -361,3 +450,35 @@ func (h handler) writeJSON(w http.ResponseWriter, status int, out any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(out)
 }
+
+type responseDeadlineWriter struct {
+	http.ResponseWriter
+	once    sync.Once
+	timeout time.Duration
+}
+
+func responseWriteDeadline(next http.Handler, timeout time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&responseDeadlineWriter{ResponseWriter: w, timeout: timeout}, r)
+	})
+}
+
+func (w *responseDeadlineWriter) setDeadline() {
+	w.once.Do(func() {
+		if err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(w.timeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.Error("httpapi response write deadline failed", "error", err)
+		}
+	})
+}
+
+func (w *responseDeadlineWriter) WriteHeader(status int) {
+	w.setDeadline()
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseDeadlineWriter) Write(b []byte) (int, error) {
+	w.setDeadline()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *responseDeadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

@@ -183,7 +183,8 @@ native 입력은 12 KiB, JSON 인코딩된 user message는 24 KiB까지다. 답�
 
 Conductor event처럼 외부 효과가 가능한 tool은 intent를 먼저 기록한다. 전송 확인을
 못 하면 `uncertain`으로 끝내고 자동 재시도·자동 side-effect replay를 하지 않는다.
-이 경우 새 실행은 전체 런타임에서 차단된다. 기존 결과 조회는 가능하다.
+이 경우 해당 workspace의 새 외부 효과는 durable 기록이 남아 있는 동안 차단된다.
+재시작·새 session·새 connection으로 우회할 수 없다. 조회와 명시적 복구는 계속 가능하다.
 레거시 OpenCode에서 도구를 허용한 세션은 prompt 또는 응답 검증 실패 시에도
 `uncertain`으로 차단한다. abort 성공은 이미 실행된 외부 효과가 없다는 증거가 아니다.
 `-recover`는 미완료 실행을 `interrupted`로 기록하며 외부 효과를 되돌리지 않는다.
@@ -203,6 +204,12 @@ OpenCode server와 해당 server의 model 설정이 필요하며 native memory/j
 `examples/opencode/tools/conductor.ts`는 operator 전용 예제이며, Conductor URL·allowlist·
 handler bindings와 `CONDUCTOR_WORKSPACE_ID`를 OpenCode server 환경에 명시해야 한다.
 이 예제를 사용자별 gateway나 인증 위임으로 사용하면 안 된다.
+
+레거시 `conductor_emit`은 기본으로 비활성이다. 이 경로를 명시적으로 켜려면
+`CONDUCTOR_LEGACY_EMIT_UNSAFE=1`을 설정해야 한다. Conductor가 event를 받았는데
+acknowledgement가 사라지면, 이후 OpenCode message가 message id가 다른 새 key로
+중복 external effect를 만들 수 있다. 이 레거시 경로에는 durable unresolved-effect
+기록이 없다. consequential work에는 native tool boundary를 사용한다.
 
 ## 검증
 

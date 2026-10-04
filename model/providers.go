@@ -72,7 +72,7 @@ func LoadProviders(path string) (map[string]Config, string, error) {
 		}
 		providers[entry.ID] = cfg
 	}
-	if err := validateCodexProfileHomes(providers); err != nil {
+	if err := ValidateCodexProfileHomes(providers); err != nil {
 		return nil, "", err
 	}
 	if config.Default == "" && len(providers) == 1 {

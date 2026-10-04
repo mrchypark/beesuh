@@ -30,3 +30,13 @@ func TestManagedCodexProfilesCannotShareAuthHome(t *testing.T) {
 		t.Fatalf("distinct profiles rejected: %v", err)
 	}
 }
+
+func TestValidateCodexProfileHomesRejectsEmptyAndDuplicates(t *testing.T) {
+	if err := ValidateCodexProfileHomes(map[string]Config{"a": {Kind: "codex-cli", CodexHome: ""}}); err == nil {
+		t.Fatal("empty home accepted")
+	}
+	home := t.TempDir()
+	if err := ValidateCodexProfileHomes(map[string]Config{"a": {Kind: "codex-cli", CodexHome: home}, "b": {Kind: "codex-cli", CodexHome: home}}); err == nil {
+		t.Fatal("duplicate home accepted")
+	}
+}

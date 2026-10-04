@@ -3,10 +3,31 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
 
 func TestClientSessionAndPrompt(t *testing.T) {
 	t.Helper()
@@ -125,5 +146,112 @@ func TestGetSessionRejectsMismatchedResponse(t *testing.T) {
 	}
 	if err := c.GetSession(context.Background(), "ses_1"); err == nil {
 		t.Fatal("GetSession accepted mismatched response")
+	}
+}
+
+func TestNewAddsDeadlineForZeroTimeoutBaseClient(t *testing.T) {
+	var deadlines []time.Time
+	c, err := New(Config{
+		BaseURL:   "https://example.test",
+		Directory: "/work",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			deadline, ok := request.Context().Deadline()
+			if !ok {
+				t.Fatal("request has no deadline")
+			}
+			deadlines = append(deadlines, deadline)
+			return nil, context.DeadlineExceeded
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Health(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Health error = %v", err)
+	}
+	if remaining := time.Until(deadlines[0]); remaining <= 0 || remaining > defaultTimeout {
+		t.Fatalf("deadline remaining = %v", remaining)
+	}
+	callerDeadline := time.Now().Add(5 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
+	defer cancel()
+	if _, err := c.Health(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Health with caller deadline error = %v", err)
+	}
+	if !deadlines[1].Equal(callerDeadline) {
+		t.Fatalf("caller deadline = %v, got %v", callerDeadline, deadlines[1])
+	}
+}
+
+func TestNewRequestClosesBodyOnPreDispatchFailure(t *testing.T) {
+	body := &trackingReadCloser{Reader: strings.NewReader("body")}
+	if _, err := newRequest(nil, http.MethodPost, "https://example.test", body); err == nil {
+		t.Fatal("newRequest accepted a nil context")
+	}
+	if !body.closed {
+		t.Fatal("newRequest did not close the body")
+	}
+}
+
+func TestDeleteSessionSendsDirectoryAndRequiresAccepted(t *testing.T) {
+	type seen struct {
+		method string
+		path   string
+		query  string
+	}
+	var got seen
+	c, err := New(Config{
+		BaseURL:   "http://opencode.test",
+		Directory: "/work tree",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = seen{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`true`)),
+				Request:    r,
+			}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteSession(context.Background(), "ses_1"); err != nil {
+		t.Fatalf("DeleteSession = %v", err)
+	}
+	if got.method != http.MethodDelete || got.path != "/session/ses_1" {
+		t.Fatalf("request = %s %s", got.method, got.path)
+	}
+	if got.query != "directory=%2Fwork+tree" {
+		t.Fatalf("query = %q", got.query)
+	}
+}
+
+func TestDeleteSessionRejectsNotAcceptedAndInvalidID(t *testing.T) {
+	reply := false
+	c, err := New(Config{
+		BaseURL:   "http://opencode.test",
+		Directory: "/work",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(strconv.FormatBool(reply))),
+				Request:    r,
+			}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteSession(context.Background(), "ses_1"); err == nil {
+		t.Fatal("DeleteSession accepted a false result")
+	}
+	reply = true
+	if err := c.DeleteSession(context.Background(), "../escape"); err == nil {
+		t.Fatal("DeleteSession accepted an invalid ID")
+	}
+	if err := c.DeleteSession(context.Background(), ""); err == nil {
+		t.Fatal("DeleteSession accepted an empty ID")
 	}
 }

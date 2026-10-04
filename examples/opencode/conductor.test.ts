@@ -3,7 +3,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
 const schema = { string: () => ({ min() { return this } }), unknown: () => ({}) }
 mock.module("@opencode-ai/plugin", () => ({ tool: Object.assign((input: unknown) => input, { schema }) }))
 const { emit, get_run } = await import("./tools/conductor")
-const keys = ["CONDUCTOR_URL", "CONDUCTOR_TOKEN", "CONDUCTOR_ALLOWED_EVENTS", "CONDUCTOR_EVENT_BINDINGS", "CONDUCTOR_WORKSPACE_ID"] as const
+const keys = ["CONDUCTOR_URL", "CONDUCTOR_TOKEN", "CONDUCTOR_ALLOWED_EVENTS", "CONDUCTOR_EVENT_BINDINGS", "CONDUCTOR_WORKSPACE_ID", "CONDUCTOR_LEGACY_EMIT_UNSAFE"] as const
 const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
 
 afterEach(() => { for (const key of keys) process.env[key] = original[key] })
@@ -14,9 +14,26 @@ function configure() {
   process.env.CONDUCTOR_ALLOWED_EVENTS = "order.created"
   process.env.CONDUCTOR_EVENT_BINDINGS = JSON.stringify({ "order.created": { handler_key: "payload.echo", handler_version: "1", operation_key: "payload.echo" } })
   process.env.CONDUCTOR_WORKSPACE_ID = "workspace"
+  process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE = "1"
 }
 
 describe("Conductor OpenCode tools", () => {
+  test("disables legacy emission by default so a retry cannot create a second effect", async () => {
+    configure()
+    delete process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE
+    const calls: Request[] = []
+    const savedFetch = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      calls.push(new Request(input, init))
+      throw new Error("lost acknowledgement")
+    }
+    try {
+      await expect(emit.execute({ name: "order.created", data: { order_id: "o_1" } }, context())).rejects.toThrow("Legacy Conductor emission is disabled")
+      await expect(emit.execute({ name: "order.created", data: { order_id: "o_1" } }, { ...context(), messageID: "msg_2" })).rejects.toThrow("Legacy Conductor emission is disabled")
+    } finally { globalThis.fetch = savedFetch }
+    expect(calls).toHaveLength(0)
+  })
+
   test("queues one bound execution with trusted linkage", async () => {
     configure()
     const calls: Request[] = []

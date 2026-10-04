@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +18,102 @@ import (
 
 	"github.com/mrchypark/beesuh/model"
 )
+
+type identityRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f identityRoundTrip) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestServiceRejectsInvalidUTF8IdentityBeforeScopedAccess(t *testing.T) {
+	r := &Runtime{opts: Options{RequireIdentity: true, Authorize: func(context.Context, Principal) error { return nil }}}
+	for _, userID := range []string{"\xff", "\xfe"} {
+		ctx := WithPrincipal(context.Background(), Principal{UserID: userID, WorkspaceID: "workspace"})
+		if _, err := r.scopedWorkspace(ctx, "workspace"); !errors.Is(err, ErrUnauthenticated) || !strings.Contains(err.Error(), "valid UTF-8") {
+			t.Fatalf("scopedWorkspace(%q) = %v", userID, err)
+		}
+		if _, err := r.History(ctx, "workspace", "session"); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("History(%q) = %v", userID, err)
+		}
+		if _, err := r.GetRun(ctx, "workspace", "request"); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("GetRun(%q) = %v", userID, err)
+		}
+	}
+	ctx := WithPrincipal(context.Background(), Principal{UserID: "사용자", WorkspaceID: "작업공간"})
+	got, err := r.scopedWorkspace(ctx, "작업공간")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "user_" + digest([]string{"사용자", "작업공간"})
+	if got != want {
+		t.Fatalf("scope = %q, want %q", got, want)
+	}
+}
+
+func TestResolvedCallerHTTPClientsDiscardSharedCookieJar(t *testing.T) {
+	target, err := url.Parse("https://provider.invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(target, []*http.Cookie{{Name: "shared", Value: "cookie"}})
+	var cookies []string
+	base := &http.Client{Jar: jar, Transport: identityRoundTrip(func(request *http.Request) (*http.Response, error) {
+		cookies = append(cookies, request.Header.Get("Cookie"))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+	})}
+	r := &Runtime{
+		opts: Options{ResolveCredential: func(context.Context, Connection) (Credential, error) {
+			return Credential{HTTPClient: base, AccountID: "account"}, nil
+		}},
+		native: &nativeEngine{opts: NativeOptions{Providers: map[string]model.Config{"provider": {}}}},
+	}
+	clients := make([]*http.Client, 0, 2)
+	for _, id := range []string{"one", "two"} {
+		credential, err := r.resolveCredential(context.Background(), Connection{ID: id, UserID: id, WorkspaceID: "workspace", Kind: "provider", TargetID: "provider", CredentialRef: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if credential.HTTPClient.Jar != nil {
+			t.Fatal("resolved client retained the caller cookie jar")
+		}
+		clients = append(clients, credential.HTTPClient)
+		response, err := credential.HTTPClient.Get(target.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+	}
+	if clients[0] == clients[1] {
+		t.Fatal("connections reused one HTTP client")
+	}
+	if strings.Join(cookies, ",") != "," {
+		t.Fatalf("caller cookies leaked to connections: %q", cookies)
+	}
+	if got := jar.Cookies(target); len(got) != 1 || got[0].Name != "shared" {
+		t.Fatalf("caller jar changed: %#v", got)
+	}
+}
+
+func TestCredentialRejectsInvalidUTF8Identifiers(t *testing.T) {
+	r := &Runtime{
+		opts: Options{ResolveCredential: func(context.Context, Connection) (Credential, error) {
+			return Credential{APIKey: "key", AccountID: "\xff"}, nil
+		}},
+		native: &nativeEngine{opts: NativeOptions{Providers: map[string]model.Config{"provider": {}}}},
+	}
+	valid := Connection{ID: "connection", UserID: "user", WorkspaceID: "workspace", Kind: "provider", TargetID: "provider", CredentialRef: "credential"}
+	if _, err := r.resolveCredential(context.Background(), valid); !errors.Is(err, ErrConnectionUnavailable) || !strings.Contains(err.Error(), "account ID must be valid UTF-8") {
+		t.Fatalf("invalid account ID = %v", err)
+	}
+	valid.ID = "\xff"
+	if _, err := r.resolveCredential(context.Background(), valid); !errors.Is(err, ErrConnectionUnavailable) || !strings.Contains(err.Error(), "connection identifiers must be valid UTF-8") {
+		t.Fatalf("invalid connection ID = %v", err)
+	}
+}
 
 func TestServiceQueueRechecksRevokedConnection(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -139,7 +238,7 @@ func TestServiceRejectsUnscopedEntryAndAccountHome(t *testing.T) {
 	if _, err := r.Status(ctx); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("global Status: %v", err)
 	}
-	opts := Options{DataDir: t.TempDir(), BackendID: "test", MaxConcurrent: 1, RequireIdentity: true, Authorize: func(context.Context, Principal) error { return nil }, Native: &NativeOptions{Provider: model.Config{Kind: "codex-cli", Model: "test"}}}
+	opts := Options{DataDir: t.TempDir(), BackendID: "test", MaxConcurrent: 1, RequireIdentity: true, Authorize: func(context.Context, Principal) error { return nil }, Native: &NativeOptions{TokenBudgetPolicy: TokenBudgetAdvisory, Provider: model.Config{Kind: "codex-cli", Model: "test", CodexHome: t.TempDir()}}}
 	opts.ResolveCredential = func(_ context.Context, c Connection) (Credential, error) { return Credential{AccountID: c.UserID}, nil }
 	secured := nativeOpen(t, opts)
 	defer secured.Close()

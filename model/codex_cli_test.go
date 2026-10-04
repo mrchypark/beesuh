@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestCodexCLIHelper(t *testing.T) {
-	if len(os.Args) < 2 || os.Args[1] != "exec" {
-		return
-	}
+func fakeCodexCLI() {
 	args := os.Args[2:]
 	var output string
 	configs := map[string]bool{}
@@ -61,6 +61,19 @@ func TestCodexCLIHelper(t *testing.T) {
 	if strings.Contains(string(input), `"content":"fail"`) {
 		os.Exit(7)
 	}
+	if strings.Contains(string(input), `"content":"helper:`) {
+		start := strings.Index(string(input), `helper:`) + len("helper:")
+		end := strings.Index(string(input)[start:], `"`)
+		if end > 0 {
+			marker := string(input)[start : start+end]
+			child := exec.Command(os.Args[0], "cli-helper", marker)
+			if err := child.Start(); err == nil {
+				// Record the helper PID synchronously so the test observes the
+				// helper process directly instead of inferring it from a sleep.
+				_ = os.WriteFile(marker+".pid", []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+			}
+		}
+	}
 	response := `{"content":"ok","tool_calls":[]}`
 	if strings.Contains(string(input), `"content":"tool"`) {
 		response = `{"content":"","tool_calls":[{"id":"call_1","name":"conductor_emit","arguments":"{}"}]}`
@@ -86,9 +99,24 @@ func TestCompleteCLIProtocol(t *testing.T) {
 	if out.FinishReason != "tool_calls" || len(out.Message.ToolCalls) != 1 || out.Message.ToolCalls[0].Function.Name != "conductor_emit" {
 		t.Fatalf("unexpected response: %+v", out)
 	}
+	if out.Usage.Available() || out.Usage.PromptTokens != -1 || out.Usage.CompletionTokens != -1 || out.Usage.TotalTokens != -1 {
+		t.Fatalf("usage must be unknown: %+v", out.Usage)
+	}
 	final, err := c.completeCLI(context.Background(), Request{Messages: []Message{{Role: "user", Content: "final"}}})
 	if err != nil || final.FinishReason != "stop" || final.Message.Content != "ok" {
 		t.Fatalf("unexpected final response: %+v, %v", final, err)
+	}
+}
+
+func TestCompleteCLIRequiresAdvisoryBudgetOptIn(t *testing.T) {
+	c := &Client{kind: "codex-cli", command: os.Args[0], model: "test", codexHome: t.TempDir()}
+	in := Request{Messages: []Message{{Role: "user", Content: "final"}}, MaxTokens: 12}
+	if _, err := c.Complete(context.Background(), in); !errors.Is(err, ErrTokenLimitNotEnforced) {
+		t.Fatalf("got %v", err)
+	}
+	out, err := c.Complete(AllowAdvisoryTokenBudget(context.Background()), in)
+	if err != nil || out.Message.Content != "ok" || out.Usage.Available() {
+		t.Fatalf("response: %+v, %v", out, err)
 	}
 }
 
@@ -106,6 +134,35 @@ func TestCompleteCLIRejectsUnknownToolAndCancels(t *testing.T) {
 	_, err := c.completeCLI(ctx, Request{Messages: []Message{{Role: "user", Content: "sleep"}}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+}
+
+func TestCompleteCLICleansOwnedProcessGroup(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "helper-ran")
+	c := &Client{command: os.Args[0], model: "test", codexHome: t.TempDir()}
+	if _, err := c.completeCLI(context.Background(), Request{Messages: []Message{{Role: "user", Content: "helper:" + marker}}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(marker + ".pid")
+	if err != nil {
+		t.Fatalf("helper pid not recorded: %v", err)
+	}
+	pid, err := strconv.Atoi(string(raw))
+	if err != nil || pid <= 1 {
+		t.Fatalf("unexpected helper pid %q: %v", raw, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("owned helper %d survived", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("owned helper survived: %v", err)
 	}
 }
 

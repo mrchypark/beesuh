@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/mrchypark/beesuh/model"
+	"github.com/mrchypark/rhiza"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -87,6 +88,55 @@ func TestNativeMemoryIsolationSkillsAndForget(t *testing.T) {
 	}
 }
 
+func TestNativeMemoryRejectsOversizedRecallItemAndSkipsLegacyItem(t *testing.T) {
+	opts := nativeOptions(t.TempDir(), t.TempDir(), "http://127.0.0.1:1", nil)
+	opts.Native.Memory = true
+	r := nativeOpen(t, opts)
+	defer r.Close()
+	ctx := context.Background()
+	req := Request{WorkspaceID: "w", SessionKey: "s", RequestID: "request"}
+	oversized := model.ToolCall{ID: "save", Type: "function", Function: model.FunctionCall{Name: "memory_save", Arguments: `{"name":"oversized","content":"` + strings.Repeat("<", 2048) + `"}`}}
+	if _, err := r.nativeTool(ctx, req, oversized); err == nil || !strings.Contains(err.Error(), "memory note exceeds recall limit") {
+		t.Fatalf("oversized save err=%v", err)
+	}
+	rows, err := r.query(ctx, `SELECT name FROM memories WHERE workspace=? AND session_key=?`, "w", "s")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("oversized save mutated memories=%v err=%v", rows, err)
+	}
+	if err := r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO memories(workspace,session_key,name,content,source_request) VALUES(?,?,?,?,?)`, Args: []any{"w", "s", "a-legacy", strings.Repeat("<", 2048), "old"}}, {SQL: `INSERT INTO memories(workspace,session_key,name,content,source_request) VALUES(?,?,?,?,?)`, Args: []any{"w", "s", "z-small", "tea", "new"}}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.memoryRecall(ctx, req, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(result), "a-legacy") || !strings.Contains(string(result), "z-small") {
+		t.Fatalf("recall=%s", result)
+	}
+}
+
+func TestMemorySystemPromptOmitsNotesThatExceedContextBudget(t *testing.T) {
+	n, err := newNative(NativeOptions{Provider: model.Config{BaseURL: "http://127.0.0.1:1/v1", Model: "test"}, Memory: true, MaxContextBytes: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memories, err := json.Marshal([]memoryRecallItem{{Name: "large", Content: strings.Repeat("x", 2048), SourceRequest: "request"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := []model.Message{{Role: "user", Content: strings.Repeat("x", 1000)}}
+	system := MemorySystemPrompt("system", memories, func(candidate string) bool {
+		_, err := n.context(candidate, nil, current, nil)
+		return err == nil
+	})
+	if system != "system" {
+		t.Fatalf("memory was injected into a full context: %q", system)
+	}
+	if _, err := n.context(system, nil, current, nil); err != nil {
+		t.Fatalf("memory omission did not preserve operability: %v", err)
+	}
+}
+
 func TestNativeEncodedLimitsDoNotPoisonRuntime(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,13 +150,13 @@ func TestNativeEncodedLimitsDoNotPoisonRuntime(t *testing.T) {
 	if _, err := r.Run(context.Background(), req); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("input err=%v", err)
 	}
-	if calls.Load() != 0 || r.blocked.Load() {
+	if calls.Load() != 0 || runFencedNow(r) {
 		t.Fatal("invalid input performed work or blocked runtime")
 	}
 	req.RequestID, req.Prompt.Text = "oversize-output", "hello"
 	out, err := r.Run(context.Background(), req)
-	if err == nil || out.State != "failed" || r.blocked.Load() {
-		t.Fatalf("out=%+v err=%v blocked=%v", out, err, r.blocked.Load())
+	if err == nil || out.State != "failed" || runFencedNow(r) {
+		t.Fatalf("out=%+v err=%v blocked=%v", out, err, runFencedNow(r))
 	}
 	// Even a confirmed tool result with many escaped bytes is a bounded omission,
 	// not an uncertain side effect that blocks unrelated sessions.
@@ -166,7 +216,7 @@ func TestRequestIdentitySerializesAcrossSessions(t *testing.T) {
 	if err := <-second; !errors.Is(err, ErrConflict) {
 		t.Fatalf("second=%v", err)
 	}
-	if r.blocked.Load() {
+	if runFencedNow(r) {
 		t.Fatal("duplicate request poisoned runtime")
 	}
 	_, prompts, _ := f.counts()

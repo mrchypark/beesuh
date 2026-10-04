@@ -6,6 +6,11 @@ const maxBodyBytes = 16 << 10
 const maxResponseBytes = 1 << 20
 type Binding = { handler_key: string; handler_version: string; operation_key: string }
 
+function legacyEmitEnabled() {
+  if (process.env.CONDUCTOR_LEGACY_EMIT_UNSAFE === "1") return
+  throw new Error("Legacy Conductor emission is disabled. Set CONDUCTOR_LEGACY_EMIT_UNSAFE=1 only if duplicate effects after a lost acknowledgement are acceptable.")
+}
+
 function conductorURL() {
   const value = process.env.CONDUCTOR_URL
   if (!value) throw new Error("CONDUCTOR_URL is required")
@@ -116,9 +121,10 @@ function accepted(body: string, requestID: string) {
 }
 
 export const emit = tool({
-  description: "Queue an explicitly configured Conductor handler execution. Acceptance is not completion; keep its execution_id and use conductor_get_run to inspect it.",
+  description: "Disabled legacy operator example. Set CONDUCTOR_LEGACY_EMIT_UNSAFE=1 only if duplicate effects after a lost acknowledgement are acceptable.",
   args: { name: tool.schema.string().min(1), data: tool.schema.unknown() },
   async execute(args, context) {
+    legacyEmitEnabled()
     const binding = bindings().get(args.name)
     if (!binding) throw new Error(`Conductor event is not allowed: ${args.name}`)
     const data = eventData(args.data)

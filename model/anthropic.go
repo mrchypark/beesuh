@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,20 +45,34 @@ func (c *Client) completeAnthropic(ctx context.Context, in Request) (Response, e
 	if wire.Role != "assistant" || (wire.StopReason != "end_turn" && wire.StopReason != "tool_use") {
 		return Response{}, errors.New("model: unsupported anthropic completion")
 	}
-	out := Response{Message: Message{Role: "assistant"}, Usage: Usage{PromptTokens: wire.Usage.InputTokens, CompletionTokens: wire.Usage.OutputTokens, TotalTokens: wire.Usage.InputTokens + wire.Usage.OutputTokens}}
-	for _, block := range wire.Content {
+	out := Response{Message: Message{Role: "assistant"}, Usage: Usage{PromptTokens: wire.Usage.InputTokens + wire.Usage.CacheReadInputTokens + wire.Usage.CacheCreationInputTokens, CompletionTokens: wire.Usage.OutputTokens}}
+	out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CompletionTokens
+	state := make([]json.RawMessage, 0, len(wire.Content))
+	hasThinking := false
+	for _, raw := range wire.Content {
+		var block anthropicContent
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&block); err != nil {
+			return Response{}, errors.New("model: invalid anthropic content")
+		}
 		switch block.Type {
 		case "text":
 			out.Message.Content += block.Text
 		case "tool_use":
-			args, err := json.Marshal(block.Input)
-			if err != nil {
+			if len(block.Input) == 0 {
 				return Response{}, errors.New("model: invalid anthropic tool input")
 			}
-			out.Message.ToolCalls = append(out.Message.ToolCalls, ToolCall{ID: block.ID, Type: "function", Function: FunctionCall{Name: block.Name, Arguments: string(args)}})
+			out.Message.ToolCalls = append(out.Message.ToolCalls, ToolCall{ID: block.ID, Type: "function", Function: FunctionCall{Name: block.Name, Arguments: string(block.Input)}})
+		case "thinking", "redacted_thinking":
+			hasThinking = true
 		default:
 			return Response{}, errors.New("model: unsupported anthropic content")
 		}
+	}
+	if hasThinking {
+		state = append(state, wire.Content...)
+		out.Message.ProviderState, _ = json.Marshal(state)
 	}
 	if wire.StopReason == "tool_use" {
 		if len(out.Message.ToolCalls) == 0 {
@@ -76,19 +91,23 @@ func (c *Client) completeAnthropic(ctx context.Context, in Request) (Response, e
 }
 
 type anthropicWire struct {
-	Role       string `json:"role"`
-	StopReason string `json:"stop_reason"`
-	Content    []struct {
-		Type  string `json:"type"`
-		Text  string `json:"text"`
-		ID    string `json:"id"`
-		Name  string `json:"name"`
-		Input any    `json:"input"`
-	} `json:"content"`
-	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+	Role       string            `json:"role"`
+	StopReason string            `json:"stop_reason"`
+	Content    []json.RawMessage `json:"content"`
+	Usage      struct {
+		InputTokens              int `json:"input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 	} `json:"usage"`
+}
+
+type anthropicContent struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 func anthropicMessages(input []Message) ([]string, []any, error) {
@@ -111,6 +130,21 @@ func anthropicMessages(input []Message) ([]string, []any, error) {
 		case "assistant":
 			flushToolResults()
 			content := make([]any, 0, 1+len(message.ToolCalls))
+			if len(message.ProviderState) != 0 {
+				var state []json.RawMessage
+				if json.Unmarshal(message.ProviderState, &state) != nil || len(state) == 0 {
+					return nil, nil, errors.New("model: invalid anthropic provider state")
+				}
+				for _, block := range state {
+					var item anthropicContent
+					if json.Unmarshal(block, &item) != nil || (item.Type != "thinking" && item.Type != "redacted_thinking" && item.Type != "text" && item.Type != "tool_use") {
+						return nil, nil, errors.New("model: invalid anthropic provider state")
+					}
+					content = append(content, block)
+				}
+				messages = append(messages, map[string]any{"role": "assistant", "content": content})
+				continue
+			}
 			if message.Content != "" {
 				content = append(content, map[string]string{"type": "text", "text": message.Content})
 			}

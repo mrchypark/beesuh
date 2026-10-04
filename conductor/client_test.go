@@ -3,9 +3,11 @@ package conductor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -47,7 +49,29 @@ func TestEmitUsesConductorEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := client.Emit(context.Background(), "workspace", "order.created", json.RawMessage(`{"id":"42"}`), "workspace:session:request:tool")
-	if err != nil || string(got) != `{"accepted":true,"events":[{"execution_id":"server-assigned-id","execution_request_id":"workspace:session:request:tool","status":"queued"}]}` {
+	if err != nil || string(got) != `{"execution_id":"server-assigned-id"}` {
+		t.Fatalf("Emit() = %s, %v", got, err)
+	}
+}
+
+func TestEmitReturnsExecutionIDWhenAcknowledgementEncodingIsLarge(t *testing.T) {
+	const executionID = "server-assigned-id"
+	acknowledgement := fmt.Sprintf(`{"accepted":true,"events":[{"execution_id":%q,"execution_request_id":"key","detail":"%s"}]}`,
+		executionID, strings.Repeat(`\\`, 7000))
+	if len(acknowledgement) >= maxBodyBytes || len(fmt.Sprintf("%q", acknowledgement)) <= 22<<10 {
+		t.Fatal("invalid oversized-encoding fixture")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(acknowledgement))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, AllowedEvents: []string{"echo"}, Bindings: map[string]Binding{"echo": {HandlerKey: "payload.echo", HandlerVersion: "1", OperationKey: "payload.echo"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Emit(context.Background(), "workspace", "echo", []byte(`{}`), "key")
+	if err != nil || string(got) != `{"execution_id":"server-assigned-id"}` {
 		t.Fatalf("Emit() = %s, %v", got, err)
 	}
 }
@@ -165,6 +189,40 @@ func TestExecutionBoundaryRejectsBeforeNetwork(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatal("invalid input reached network")
+	}
+}
+
+func TestNewRejectsNoncanonicalEventNames(t *testing.T) {
+	for _, name := range []string{" echo ", "echo/next", "echo\\next", "echo\x01next"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			_, err := New(Config{BaseURL: "http://example.test", AllowedEvents: []string{name}, Bindings: map[string]Binding{name: {HandlerKey: "payload.echo", HandlerVersion: "1", OperationKey: "payload.echo"}}})
+			if err == nil {
+				t.Fatal("New accepted a noncanonical event name")
+			}
+		})
+	}
+}
+
+func TestExecutionIDLimitIsSharedByEmitAndLookup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"accepted":true,"events":[{"execution_id":%q,"execution_request_id":"key"}]}`, strings.Repeat("a", MaxIDBytes))))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, AllowedEvents: []string{"echo"}, Bindings: map[string]Binding{"echo": {HandlerKey: "payload.echo", HandlerVersion: "1", OperationKey: "payload.echo"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Emit(context.Background(), "workspace", "echo", []byte(`{}`), "key"); err != nil {
+		t.Fatalf("Emit rejected a %d-byte execution ID: %v", MaxIDBytes, err)
+	}
+	if _, err := client.GetExecution(context.Background(), strings.Repeat("a", MaxIDBytes)); err != nil {
+		t.Fatalf("GetExecution rejected a %d-byte execution ID: %v", MaxIDBytes, err)
+	}
+	for _, size := range []int{MaxIDBytes + 1, 512} {
+		if _, err := client.GetExecution(context.Background(), strings.Repeat("a", size)); err == nil {
+			t.Fatalf("GetExecution accepted a %d-byte execution ID", size)
+		}
 	}
 }
 

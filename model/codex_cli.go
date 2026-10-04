@@ -37,6 +37,9 @@ func newCLI(cfg Config) (*Client, error) {
 // completeCLI uses Codex only as a model bridge.  Tool calls are returned to
 // Beesuh; Codex is not allowed to execute them itself.
 func (c *Client) completeCLI(ctx context.Context, in Request) (Response, error) {
+	if err := c.validateTokenLimit(ctx, in); err != nil {
+		return Response{}, err
+	}
 	ctx, cancel := cliContext(ctx)
 	defer cancel()
 	work, err := os.MkdirTemp("", "beesuh-codex-")
@@ -67,6 +70,9 @@ func (c *Client) completeCLI(ctx context.Context, in Request) (Response, error) 
 		}
 		return Response{}, errors.New("model: Codex CLI failed")
 	}
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if stdout.exceeded || stderr.exceeded {
 		return Response{}, errors.New("model: Codex CLI output exceeds 1 MiB")
 	}
@@ -74,7 +80,12 @@ func (c *Client) completeCLI(ctx context.Context, in Request) (Response, error) 
 	if err != nil {
 		return Response{}, err
 	}
-	return decodeCodexOutput(b, in.Tools)
+	out, err := decodeCodexOutput(b, in.Tools)
+	if err != nil {
+		return Response{}, err
+	}
+	out.Usage = unknownUsage()
+	return out, nil
 }
 
 func cliCommand(ctx context.Context, command string, args []string, codexHome string) *exec.Cmd {

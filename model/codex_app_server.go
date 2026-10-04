@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,6 +61,9 @@ func newAppServer(cfg Config) (*Client, error) {
 }
 
 func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, error) {
+	if err := c.validateTokenLimit(ctx, in); err != nil {
+		return Response{}, err
+	}
 	if c.codexAuth == nil || strings.TrimSpace(c.codexAccountID) == "" {
 		return Response{}, auth.ErrInvalidCredentials
 	}
@@ -84,7 +88,7 @@ func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, e
 	if err := os.Mkdir(filepath.Join(home, ".codex"), 0o700); err != nil {
 		return Response{}, errors.New("model: create isolated Codex state directory failed")
 	}
-	cmd := exec.CommandContext(ctx, c.command, appServerArgs()...)
+	cmd := exec.CommandContext(context.Background(), c.command, appServerArgs()...)
 	cmd.Dir = work
 	cmd.Env = appServerEnv(home)
 	cmd.Stderr = io.Discard
@@ -107,7 +111,26 @@ func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, e
 	if err := cmd.Start(); err != nil {
 		return Response{}, errors.New("model: start Codex app-server failed")
 	}
-	defer func() { _ = inPipe.Close(); _ = cmd.Cancel(); _ = cmd.Wait() }()
+	var cleanupOnce sync.Once
+	stop := func() {
+		cleanupOnce.Do(func() {
+			_ = inPipe.Close()
+			_ = outPipe.Close()
+			_ = cmd.Cancel()
+			if cmd.Process != nil {
+				_, _ = cmd.Process.Wait()
+			}
+		})
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			stop()
+		case <-done:
+		}
+	}()
+	defer func() { close(done); stop() }()
 	rpc := &appServerRPC{in: inPipe, scan: bufio.NewScanner(outPipe), source: c.codexAuth, accountID: c.codexAccountID}
 	rpc.scan.Buffer(make([]byte, 4096), maxResponseBytes+1)
 	if _, err := rpc.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "beesuh", "version": "0.1"}, "capabilities": map[string]any{"experimentalApi": true}}); err != nil {
@@ -141,9 +164,17 @@ func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, e
 	}
 	content, err := rpc.waitTurn(ctx, threadID, turnID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return Response{}, ctx.Err()
+		}
 		return Response{}, err
 	}
-	return decodeCodexOutput([]byte(content), in.Tools)
+	out, err := decodeCodexOutput([]byte(content), in.Tools)
+	if err != nil {
+		return Response{}, err
+	}
+	out.Usage = unknownUsage()
+	return out, nil
 }
 
 func appServerArgs() []string {

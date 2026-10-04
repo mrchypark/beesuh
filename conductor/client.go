@@ -12,15 +12,18 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mrchypark/beesuh/auth"
 )
 
 const (
 	maxBodyBytes   = 16 << 10
-	maxIDBytes     = 512
 	requestTimeout = 10 * time.Second
 )
+
+// MaxIDBytes is the maximum size of an execution ID accepted by Emit and GetExecution.
+const MaxIDBytes = 256
 
 // Config configures a Conductor API client.
 type Config struct {
@@ -69,8 +72,7 @@ func New(config Config) (*Client, error) {
 
 	allowed := make(map[string]Binding, len(config.AllowedEvents))
 	for _, name := range config.AllowedEvents {
-		name = strings.TrimSpace(name)
-		if name == "" || len(name) > maxIDBytes {
+		if name != strings.TrimSpace(name) || validID(name, "allowed event name") != nil {
 			return nil, errors.New("conductor allowed event name is invalid")
 		}
 		binding, ok := config.Bindings[name]
@@ -120,7 +122,9 @@ func (c *Client) Emit(ctx context.Context, workspace, name string, data json.Raw
 	if json.Unmarshal(output, &ack) != nil || !ack.Accepted || len(ack.Events) != 1 || ack.Events[0].RequestID != idempotencyKey || validID(ack.Events[0].ExecutionID, "execution ID") != nil {
 		return nil, errors.New("conductor execution acknowledgement is invalid")
 	}
-	return output, nil
+	return json.Marshal(struct {
+		ExecutionID string `json:"execution_id"`
+	}{ExecutionID: ack.Events[0].ExecutionID})
 }
 
 // ValidateEmit checks the complete request before the runtime records an effect intent.
@@ -252,7 +256,7 @@ func (c *Client) request(ctx context.Context, method, path string, body []byte) 
 }
 
 func validID(value, label string) error {
-	if strings.TrimSpace(value) == "" || len(value) > maxIDBytes || value == "." || value == ".." || strings.ContainsAny(value, "/\\\r\n\x00") {
+	if strings.TrimSpace(value) == "" || len(value) > MaxIDBytes || value == "." || value == ".." || strings.ContainsAny(value, "/\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return fmt.Errorf("conductor %s is invalid", label)
 	}
 	return nil

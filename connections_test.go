@@ -181,7 +181,7 @@ func TestRegisterReadyRequiresResolvedCredential(t *testing.T) {
 		t.Fatalf("registration=%v", err)
 	}
 	list, err := r.Connections(WithPrincipal(context.Background(), Principal{UserID: "u", WorkspaceID: "w"}))
-	if err != nil || len(list) != 0 || r.blocked.Load() {
-		t.Fatalf("failed registration mutated state: %+v %v blocked=%v", list, err, r.blocked.Load())
+	if err != nil || len(list) != 0 || runFencedNow(r) {
+		t.Fatalf("failed registration mutated state: %+v %v blocked=%v", list, err, runFencedNow(r))
 	}
 }

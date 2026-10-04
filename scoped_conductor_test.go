@@ -185,8 +185,8 @@ func TestScopedConductorRejectsOtherTargetEventWithoutBlocking(t *testing.T) {
 	if !errors.Is(err, ErrForbidden) || out.State != "failed" {
 		t.Fatalf("run = %+v, %v", out, err)
 	}
-	if effects.Load() != 0 || r.blocked.Load() {
-		t.Fatalf("foreign event caused external effect/block: effects=%d blocked=%v", effects.Load(), r.blocked.Load())
+	if effects.Load() != 0 || runFencedNow(r) {
+		t.Fatalf("foreign event caused external effect/block: effects=%d blocked=%v", effects.Load(), runFencedNow(r))
 	}
 }
 

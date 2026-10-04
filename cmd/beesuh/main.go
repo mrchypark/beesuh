@@ -63,8 +63,10 @@ func run() error {
 		maxTurns       = flag.Int("max-turns", 12, "native maximum model/tool turns")
 		maxContext     = flag.Int("max-context-bytes", 65536, "native maximum saved context bytes")
 		maxOutput      = flag.Int("max-output-tokens", 2048, "native maximum completion tokens")
+		tokenBudget    = flag.String("token-budget-policy", string(beesuh.TokenBudgetStrict), "native token budget policy: strict, advisory, or unlimited")
 		interactive    = flag.Bool("interactive", false, "read direct chat messages, one line at a time")
 		listen         = flag.String("listen", "", "serve direct chat HTTP, e.g. 127.0.0.1:8080; requires BEESUH_API_TOKEN")
+		writeTimeout   = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
 	)
 	flag.Parse()
 	if !filepath.IsAbs(*directory) {
@@ -94,7 +96,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			native = &beesuh.NativeOptions{Providers: providers, DefaultProvider: defaultProvider, System: *system, SkillsDir: *skillsDir, Memory: *memory, MaxTurns: *maxTurns, MaxContextBytes: *maxContext, MaxOutputTokens: *maxOutput}
+			native = &beesuh.NativeOptions{Providers: providers, DefaultProvider: defaultProvider, System: *system, SkillsDir: *skillsDir, Memory: *memory, MaxTurns: *maxTurns, MaxContextBytes: *maxContext, MaxOutputTokens: *maxOutput, TokenBudgetPolicy: beesuh.TokenBudgetPolicy(*tokenBudget)}
 			requestProvider = *providerID
 		} else {
 			if strings.TrimSpace(*providerID) != "" {
@@ -103,7 +105,7 @@ func run() error {
 			if strings.TrimSpace(*modelURL) == "" || strings.TrimSpace(*modelName) == "" {
 				return errors.New("-model-url (or BEESUH_MODEL_URL) and -model (or BEESUH_MODEL) are required with -backend native")
 			}
-			native = &beesuh.NativeOptions{Provider: model.Config{BaseURL: *modelURL, APIKey: os.Getenv("BEESUH_MODEL_API_KEY"), Model: *modelName}, System: *system, SkillsDir: *skillsDir, Memory: *memory, MaxTurns: *maxTurns, MaxContextBytes: *maxContext, MaxOutputTokens: *maxOutput}
+			native = &beesuh.NativeOptions{Provider: model.Config{BaseURL: *modelURL, APIKey: os.Getenv("BEESUH_MODEL_API_KEY"), Model: *modelName}, System: *system, SkillsDir: *skillsDir, Memory: *memory, MaxTurns: *maxTurns, MaxContextBytes: *maxContext, MaxOutputTokens: *maxOutput, TokenBudgetPolicy: beesuh.TokenBudgetPolicy(*tokenBudget)}
 		}
 		if *listen != "" && requestProvider != "" {
 			native.DefaultProvider = requestProvider
@@ -164,7 +166,14 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+		// The write budget must cover the full request plus the handler's bounded
+		// response write. A client that stops reading is cut off; it can refetch the
+		// durable result with a new request.
+		write := *writeTimeout
+		if write <= 0 {
+			write = *timeout + 2*httpapi.WriteBudget
+		}
+		server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: write, IdleTimeout: 60 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 		finished := make(chan error, 1)
 		go func() { finished <- server.Serve(listener) }()
 		fmt.Fprintln(os.Stderr, "beesuh listening on", listener.Addr())

@@ -274,6 +274,70 @@ func TestOAuthClientRechecksConsentBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestOAuthTransportClosesBodyBeforeDispatch(t *testing.T) {
+	now := time.Unix(100, 0)
+	mode := ""
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch mode {
+		case "delivery":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "expired":
+			value := oauthFixture(now, 1, "account", []string{"read"})
+			value["token_expires_at_unix_ms"] = now.UnixMilli()
+			json.NewEncoder(w).Encode(value)
+		}
+	}))
+	defer issuer.Close()
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("provider request dispatched")
+	}))
+	defer provider.Close()
+	client, err := NewOAuthClient(issuer.URL, oauthBinding(provider.URL), func(context.Context, OAuthTokenRequest) (string, error) {
+		if mode == "source" {
+			return "", errors.New("source failed")
+		}
+		return "human", nil
+	}, issuer.Client(), provider.Client(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		path     string
+		canceled bool
+	}{
+		{name: "destination", path: "/other"},
+		{name: "source", path: "/chat"},
+		{name: "delivery", path: "/chat"},
+		{name: "expired", path: "/chat"},
+		{name: "canceled", path: "/chat", canceled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mode = test.name
+			body := &trackingBody{Reader: strings.NewReader("payload")}
+			ctx := context.Background()
+			if test.canceled {
+				transport := client.Transport.(*oauthTransport)
+				transport.gate <- struct{}{}
+				defer func() { <-transport.gate }()
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.URL+test.path, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Transport.RoundTrip(request); err == nil {
+				t.Fatal("pre-dispatch failure succeeded")
+			}
+			if body.closes != 1 {
+				t.Fatalf("body closes = %d, want 1", body.closes)
+			}
+		})
+	}
+}
+
 func oauthBinding(endpoint string) OAuthBinding {
 	return OAuthBinding{GrantID: "grant", ProviderID: "provider", ConnectionGeneration: "generation", AccountID: "account", Resource: "https://beesuh.local.test", ConsumerClientID: "beesuh", Endpoint: endpoint + "/chat", Scopes: []string{"read"}, CredentialVersion: 1}
 }

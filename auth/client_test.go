@@ -3,8 +3,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,22 @@ import (
 
 	"golang.org/x/oauth2"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed.Store(true)
+	return nil
+}
 
 func TestHeaderClientInjectsWithoutMutatingAndDoesNotFollowRedirects(t *testing.T) {
 	var target atomic.Bool
@@ -95,6 +114,56 @@ func TestClientsInitializeNilHeadersAndBoundTimeout(t *testing.T) {
 	response.Body.Close()
 	if request.Header != nil {
 		t.Fatal("caller nil header was changed")
+	}
+}
+
+func TestAuthenticatedClientsDiscardBaseCookieJar(t *testing.T) {
+	target, err := url.Parse("https://example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(target, []*http.Cookie{{Name: "base", Value: "cookie"}})
+	base := &http.Client{Jar: jar, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Cookie"); got != "" {
+			t.Errorf("cookie = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Set-Cookie": {"derived=cookie"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    request,
+		}, nil
+	})}
+	headerClient, err := HeaderClient(base, http.Header{"Authorization": {"Bearer header"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthClient, err := OAuthClient(base, func(context.Context) (*oauth2.Token, error) {
+		return &oauth2.Token{AccessToken: "oauth"}, nil
+	}, func(context.Context, *oauth2.Token) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, client := range map[string]*http.Client{"header": headerClient, "oauth": oauthClient} {
+		t.Run(name, func(t *testing.T) {
+			if client.Jar != nil {
+				t.Fatal("client inherited base cookie jar")
+			}
+			for range 2 {
+				response, err := client.Get(target.String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+			}
+		})
+	}
+	if got := jar.Cookies(target); len(got) != 1 || got[0].Name != "base" {
+		t.Fatalf("base cookies = %#v", got)
 	}
 }
 
@@ -205,6 +274,72 @@ func TestOAuthClientRejectsInjectedTokenBeforePersistence(t *testing.T) {
 	}
 	if persisted.Load() != 0 {
 		t.Fatal("invalid token was persisted")
+	}
+}
+
+func TestOAuthTransportClosesBodyOnPreDispatchFailure(t *testing.T) {
+	var dispatched atomic.Int32
+	client, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		dispatched.Add(1)
+		return nil, errors.New("must not dispatch")
+	})}, func(context.Context) (*oauth2.Token, error) {
+		return nil, errors.New("source failed")
+	}, func(context.Context, *oauth2.Token) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	directBody := &trackingReadCloser{Reader: strings.NewReader("body")}
+	directRequest, err := http.NewRequest(http.MethodPost, "https://example.test", directBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Transport.RoundTrip(directRequest); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("direct RoundTrip error = %v", err)
+	}
+	if !directBody.closed.Load() {
+		t.Fatal("direct RoundTrip did not close body")
+	}
+	clientBody := &trackingReadCloser{Reader: strings.NewReader("body")}
+	clientRequest, err := http.NewRequest(http.MethodPost, "https://example.test", clientBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(clientRequest); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("client Do error = %v", err)
+	}
+	if !clientBody.closed.Load() {
+		t.Fatal("client Do did not close body")
+	}
+	if got := dispatched.Load(); got != 0 {
+		t.Fatalf("dispatches = %d", got)
+	}
+}
+
+func TestOAuthClientRejectsTokenExpiredDuringPersistence(t *testing.T) {
+	var dispatched, persisted atomic.Int32
+	expiry := time.Now().Add(12 * time.Second)
+	client, err := OAuthClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		dispatched.Add(1)
+		return nil, errors.New("must not dispatch")
+	})}, func(context.Context) (*oauth2.Token, error) {
+		return &oauth2.Token{AccessToken: "token", Expiry: expiry}, nil
+	}, func(context.Context, *oauth2.Token) error {
+		persisted.Add(1)
+		time.Sleep(time.Until(expiry.Add(-10*time.Second)) + 100*time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://example.test", nil)
+	if _, err := client.Transport.RoundTrip(request); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("RoundTrip error = %v", err)
+	}
+	if got := persisted.Load(); got != 1 {
+		t.Fatalf("persist calls = %d", got)
+	}
+	if got := dispatched.Load(); got != 0 {
+		t.Fatalf("dispatches = %d", got)
 	}
 }
 

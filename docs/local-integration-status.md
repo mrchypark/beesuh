@@ -53,6 +53,12 @@ checking gateway; setting it cannot enable those checks on Conductor. Direct
 local integration is a non-SaaS service fixture. User delegation, profile use,
 and side-effect rollback are not established by that fixture.
 
+The legacy OpenCode `conductor_emit` example is disabled by default. An operator
+must set `CONDUCTOR_LEGACY_EMIT_UNSAFE=1` to enable it. This legacy path does not
+persist an unresolved-effect record. If Conductor accepts an event and its
+acknowledgement is lost, a later OpenCode message can create a separately keyed
+duplicate effect. Use the native tool boundary for consequential work.
+
 To test an explicitly started isolated worker:
 
 ```sh

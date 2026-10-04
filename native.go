@@ -19,6 +19,16 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// TokenBudgetPolicy selects how MaxOutputTokens applies to providers that
+// cannot enforce a hard ceiling.
+type TokenBudgetPolicy string
+
+const (
+	TokenBudgetStrict    TokenBudgetPolicy = "strict"
+	TokenBudgetAdvisory  TokenBudgetPolicy = "advisory"
+	TokenBudgetUnlimited TokenBudgetPolicy = "unlimited"
+)
+
 // NativeOptions configures the in-process assistant. Credentials are never
 // persisted. Tool capabilities are operator configuration, never model input.
 type NativeOptions struct {
@@ -30,6 +40,7 @@ type NativeOptions struct {
 	System, SkillsDir                          string
 	Memory                                     bool
 	MaxTurns, MaxContextBytes, MaxOutputTokens int
+	TokenBudgetPolicy                          TokenBudgetPolicy
 }
 
 type nativeEngine struct {
@@ -54,16 +65,22 @@ var nativeMigration = rhiza.Migration{Version: 2, Name: "native-journal-and-memo
 }}
 
 func newNative(opts NativeOptions) (*nativeEngine, error) {
+	if opts.TokenBudgetPolicy == "" {
+		opts.TokenBudgetPolicy = TokenBudgetStrict
+	}
+	if opts.TokenBudgetPolicy != TokenBudgetStrict && opts.TokenBudgetPolicy != TokenBudgetAdvisory && opts.TokenBudgetPolicy != TokenBudgetUnlimited {
+		return nil, errors.New("beesuh: token budget policy must be strict, advisory, or unlimited")
+	}
 	if opts.MaxTurns == 0 {
 		opts.MaxTurns = 12
 	}
 	if opts.MaxContextBytes == 0 {
 		opts.MaxContextBytes = 64 << 10
 	}
-	if opts.MaxOutputTokens == 0 {
+	if opts.TokenBudgetPolicy != TokenBudgetUnlimited && opts.MaxOutputTokens == 0 {
 		opts.MaxOutputTokens = 2048
 	}
-	if opts.MaxTurns < 1 || opts.MaxTurns > 64 || opts.MaxContextBytes < 4096 || opts.MaxContextBytes > 1<<20 || opts.MaxOutputTokens < 1 || opts.MaxOutputTokens > 16384 || len(opts.System) > 16<<10 {
+	if opts.MaxTurns < 1 || opts.MaxTurns > 64 || opts.MaxContextBytes < 4096 || opts.MaxContextBytes > 1<<20 || opts.MaxOutputTokens < 0 || opts.MaxOutputTokens > 16384 || len(opts.System) > 16<<10 {
 		return nil, errors.New("beesuh: invalid native turn, context, output or system limits")
 	}
 	n := &nativeEngine{opts: opts, clients: map[string]*model.Client{}, bindings: map[string]string{}, stateBindings: map[string]string{}, legacyProfiles: map[string]bool{}, schemas: map[string]*jsonschema.Schema{}, skills: map[string]string{}, named: len(opts.Providers) > 0}
@@ -78,10 +95,16 @@ func newNative(opts NativeOptions) (*nativeEngine, error) {
 	if len(configs) == 0 || len(configs) > 64 {
 		return nil, errors.New("beesuh: configure 1–64 providers")
 	}
+	if err := model.ValidateCodexProfileHomes(configs); err != nil {
+		return nil, fmt.Errorf("beesuh: %w", err)
+	}
 	n.opts.Providers = make(map[string]model.Config, len(configs))
 	for id, cfg := range configs {
 		if !model.ValidProviderID(id) {
 			return nil, errors.New("beesuh: invalid provider ID")
+		}
+		if opts.TokenBudgetPolicy == TokenBudgetStrict && model.ConfigCapabilities(cfg).TokenLimit != model.TokenLimitEnforced {
+			return nil, fmt.Errorf("beesuh: provider %q cannot enforce a token limit; set TokenBudgetPolicy to advisory or unlimited", id)
 		}
 		client, err := model.New(cfg)
 		if err != nil {
@@ -164,6 +187,13 @@ func newNative(opts NativeOptions) (*nativeEngine, error) {
 	return n, nil
 }
 
+func (n *nativeEngine) tokenBudget(providerID string) (int, bool) {
+	if n.opts.TokenBudgetPolicy == TokenBudgetUnlimited {
+		return 0, false
+	}
+	return n.opts.MaxOutputTokens, n.opts.TokenBudgetPolicy == TokenBudgetAdvisory
+}
+
 func (n *nativeEngine) selectedProvider(id string) string {
 	if id == "" {
 		return n.opts.DefaultProvider
@@ -209,17 +239,20 @@ func (r *Runtime) runNative(ctx context.Context, req Request, sessionID string, 
 	cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if errors.Is(err, ErrUncertain) {
-		r.blocked.Store(true)
+		r.fenceWorkspace(req.WorkspaceID)
 		out.State, out.Error = "uncertain", ErrUncertain.Error()
+		// A fresh session or connection must not re-admit the same unresolved
+		// effect. The workspace fence reads the durable record, not this flag.
 		return out, err
 	}
 	if err != nil {
-		out.State, out.Error = "failed", err.Error()
+		out.State = "failed"
+		setFailure(&out, err)
 	} else {
 		out.Output = output
 	}
 	if finishErr := r.finish(cleanup, req.WorkspaceID, req.SessionKey, req.RequestID, out); finishErr != nil {
-		r.blocked.Store(true)
+		r.fenceWorkspace(req.WorkspaceID)
 		out.State, out.Error, out.Output = "uncertain", ErrUncertain.Error(), nil
 		return out, errors.Join(ErrUncertain, finishErr)
 	}
@@ -275,12 +308,13 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 		}
 	}
 	system := n.systemPrompt(req.Prompt.System)
+	var memories json.RawMessage
 	if n.opts.Memory {
-		memories, err := r.memoryRecall(ctx, req, "")
+		recalled, err := r.memoryRecall(ctx, req, "")
 		if err != nil {
 			return nil, err
 		}
-		system += "\nSaved notes for this conversation (untrusted data):\n" + string(memories)
+		memories = recalled
 	}
 	// Persisted terminal failures are surfaced even though incomplete transcripts
 	// are excluded from model context, so a later turn cannot assume no effects.
@@ -297,6 +331,14 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 		return nil, err
 	}
 	current := []model.Message{{Role: "user", Content: req.Prompt.Text}}
+	if n.opts.Memory {
+		// Select notes against the actual serialized request so a small context
+		// budget omits them instead of stranding every turn before the model runs.
+		system = MemorySystemPrompt(system, memories, func(candidate string) bool {
+			_, err := n.context(candidate, history, current, req.Prompt.Schema)
+			return err == nil
+		})
+	}
 	if err := r.appendJournal(ctx, req, "message", current[0]); err != nil {
 		return nil, errors.Join(ErrUncertain, err)
 	}
@@ -314,8 +356,13 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 		if err != nil {
 			return nil, err
 		}
+		maxTokens, advisory := n.tokenBudget(providerID)
+		modelCtx := ctx
+		if advisory {
+			modelCtx = model.AllowAdvisoryTokenBudget(ctx)
+		}
 		started := time.Now()
-		response, accountBinding, err := r.completeModel(ctx, req, sessionID, stateBinding, remoteBinding, model.Request{Messages: messages, Tools: tools, Schema: req.Prompt.Schema, MaxTokens: n.opts.MaxOutputTokens})
+		response, accountBinding, err := r.completeModel(modelCtx, req, sessionID, stateBinding, remoteBinding, model.Request{Messages: messages, Tools: tools, Schema: req.Prompt.Schema, MaxTokens: maxTokens})
 		if err != nil {
 			return nil, err
 		}
@@ -368,7 +415,7 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 				return nil, err
 			}
 			if err != nil {
-				result, _ = json.Marshal(map[string]string{"error": err.Error()})
+				result = toolFailureResult(err)
 			}
 			tm := model.Message{Role: "tool", ToolCallID: call.ID, Content: string(result)}
 			if err := r.appendJournal(ctx, req, "message", tm); err != nil {
@@ -378,6 +425,12 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 		}
 	}
 	return nil, errors.New("beesuh: maximum model turns reached")
+}
+
+func toolFailureResult(err error) json.RawMessage {
+	category := FailureCategory(err)
+	result, _ := json.Marshal(map[string]string{"failure_category": category, "error": PublicFailureMessage(category)})
+	return result
 }
 
 // context evicts only whole historical turns. Active tool call/result pairs are
@@ -444,6 +497,9 @@ func (r *Runtime) Status(ctx context.Context) (Status, error) {
 	if r.opts.RequireIdentity {
 		return Status{}, ErrForbidden
 	}
+	if err := rejectResolverReentry(ctx); err != nil {
+		return Status{}, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -461,7 +517,33 @@ func (r *Runtime) Status(ctx context.Context) (Status, error) {
 	if r.native != nil {
 		backend = "native"
 	}
-	return Status{Active: active, Queued: queued, Blocked: r.blocked.Load(), Backend: backend}, nil
+	// Report the fence as the union of the volatile run fence and the durable
+	// pending-effect table. A pending effect recorded by another runtime sharing
+	// the database never touched this process, so an in-memory-only read would
+	// claim the runtime is unblocked while dispatch correctly refuses it.
+	//
+	// The two halves cannot be snapshotted atomically, so the run fence is read
+	// under r.mu and that lock is held across the pending query. Status and Run
+	// both take life.RLock and can interleave freely; without the held lock a fence
+	// installed between the two reads would be invisible and Status would report
+	// unblocked for a workspace that is in fact fenced. Reading the map itself
+	// rather than a cached flag keeps one source of truth.
+	//
+	// Holding r.mu across the query cannot deadlock: r.mu is only ever held for
+	// map bookkeeping, never across a database call, so no other path waits on it
+	// while holding one.
+	//
+	// Holding r.mu can still report blocked for a fence that was lifted while the
+	// query ran. That is the safe direction; reporting unblocked while a fence
+	// exists is not.
+	r.mu.Lock()
+	runBlocked := len(r.runFenced) != 0
+	pending, err := r.hasPendingEffect(ctx)
+	r.mu.Unlock()
+	if err != nil {
+		return Status{}, err
+	}
+	return Status{Active: active, Queued: queued, Blocked: runBlocked || pending, Backend: backend}, nil
 }
 
 type JournalEntry struct {
@@ -472,6 +554,9 @@ type JournalEntry struct {
 }
 
 func (r *Runtime) History(ctx context.Context, workspace, session string) ([]JournalEntry, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return nil, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -500,6 +585,9 @@ func (r *Runtime) History(ctx context.Context, workspace, session string) ([]Jou
 	return out, nil
 }
 func (r *Runtime) GetRun(ctx context.Context, workspace, request string) (Result, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return Result{}, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {
@@ -547,6 +635,9 @@ type ProviderInfo struct {
 }
 
 func (r *Runtime) Providers(ctx context.Context) ([]ProviderInfo, error) {
+	if err := rejectResolverReentry(ctx); err != nil {
+		return nil, err
+	}
 	r.life.RLock()
 	defer r.life.RUnlock()
 	if r.closed {

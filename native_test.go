@@ -139,6 +139,73 @@ func TestNativePersistsHistoryToolJournalAndReplay(t *testing.T) {
 	}
 }
 
+func TestNativeAnthropicPreservesLongDecimalThroughJournalAndConductor(t *testing.T) {
+	const decimal = "0.1234567890123456789012345678901234567890"
+	const arguments = `{"name":"deploy","data":{"amount":` + decimal + `}}`
+	var eventData json.RawMessage
+	models := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages":
+			models++
+			if models == 1 {
+				_, _ = w.Write([]byte(`{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"emit","name":"conductor_emit","input":` + arguments + `}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		case "/v1/events":
+			var body struct {
+				Events []struct {
+					Data json.RawMessage `json:"data"`
+					Key  string          `json:"idempotency_key"`
+				} `json:"events"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Events) != 1 {
+				t.Fatal("invalid event payload")
+			}
+			eventData = body.Events[0].Data
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true, "events": []any{map[string]any{"execution_id": "run-1", "execution_request_id": body.Events[0].Key, "status": "queued"}}})
+		default:
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	cond := &conductor.Config{BaseURL: server.URL, AllowedEvents: []string{"deploy"}, Bindings: map[string]conductor.Binding{"deploy": {HandlerKey: "payload.echo", HandlerVersion: "1", OperationKey: "payload.echo"}}}
+	opts := nativeOptions(t.TempDir(), t.TempDir(), server.URL, cond)
+	opts.Native.Provider.API = "anthropic"
+	r := nativeOpen(t, opts)
+	defer r.Close()
+	result, err := r.Run(context.Background(), Request{WorkspaceID: "workspace", SessionKey: "session", RequestID: "request", Prompt: opencode.Prompt{Text: "deploy"}})
+	if err != nil || string(result.Output) != `{"text":"done"}` {
+		t.Fatalf("run: %+v, %v", result, err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(eventData, &payload); err != nil || string(payload["amount"]) != decimal {
+		t.Fatalf("Conductor payload lost decimal: %s", eventData)
+	}
+	journal, err := r.History(context.Background(), "workspace", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range journal {
+		if entry.Kind != "tool_intent" {
+			continue
+		}
+		var intent struct {
+			Call model.ToolCall `json:"call"`
+		}
+		if err := json.Unmarshal(entry.Payload, &intent); err != nil {
+			t.Fatal(err)
+		}
+		if intent.Call.Function.Arguments != arguments {
+			t.Fatalf("journal arguments = %s", intent.Call.Function.Arguments)
+		}
+		return
+	}
+	t.Fatal("tool intent was not recorded")
+}
+
 func TestNativeRejectsSchemaAndUnconfiguredTool(t *testing.T) {
 	var models, conductorCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +378,7 @@ func TestNativeRejectsReservedConductorMetadataWithoutEffect(t *testing.T) {
 			if _, err := r.Run(context.Background(), req); err != nil {
 				t.Fatal(err)
 			}
-			if effects.Load() != 0 || r.blocked.Load() {
+			if effects.Load() != 0 || runFencedNow(r) {
 				t.Fatal("reserved metadata sent an effect or blocked runtime")
 			}
 			history, err := r.History(context.Background(), "w", "s")

@@ -8,8 +8,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +19,22 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 2 && os.Args[1] == "cli-helper" {
+		// The marker is deliberately written only after a delay that is far
+		// longer than any parent-side timing, so the test proves the process
+		// group was killed rather than that the helper was merely slow.
+		time.Sleep(5 * time.Second)
+		_ = os.WriteFile(os.Args[2], []byte("survived"), 0o600)
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "exec" {
+		fakeCodexCLI()
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "hold-stdout" {
+		time.Sleep(time.Second)
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "app-server" {
 		fakeAppServer()
 		os.Exit(0)
@@ -39,6 +57,28 @@ func TestCodexAppServerExternalAuth(t *testing.T) {
 	}
 	if response.Message.Content != "ok" || len(requests) != 2 || requests[0].Reason != "initial" || requests[1].Reason != "unauthorized" || requests[1].PreviousAccountID != "account-a" {
 		t.Fatalf("unexpected response or refresh: %#v %#v", response, requests)
+	}
+	if response.Usage.Available() {
+		t.Fatalf("usage must be unknown: %+v", response.Usage)
+	}
+}
+
+func TestCodexAppServerRequiresAdvisoryBudgetOptIn(t *testing.T) {
+	called := false
+	client, err := newAppServer(Config{Command: os.Args[0], Model: "test", CodexAccountID: "account-a", CodexAuth: func(context.Context, CodexAuthRequest) (CodexAuthTokens, error) {
+		called = true
+		return CodexAuthTokens{AccessToken: "x", AccountID: "account-a"}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := Request{Messages: []Message{{Role: "user", Content: "hello"}}, MaxTokens: 12}
+	if _, err := client.Complete(context.Background(), in); !errors.Is(err, ErrTokenLimitNotEnforced) || called {
+		t.Fatalf("err=%v auth_called=%v", err, called)
+	}
+	response, err := client.Complete(AllowAdvisoryTokenBudget(context.Background()), in)
+	if err != nil || response.Message.Content != "ok" || response.Usage.Available() {
+		t.Fatalf("response: %+v, %v", response, err)
 	}
 }
 
@@ -175,6 +215,14 @@ func fakeAppServer() {
 			if plan == "slow" {
 				continue
 			}
+			if plan == "detached" {
+				child := exec.Command(os.Args[0], "hold-stdout")
+				child.Stdout = os.Stdout
+				child.Stderr = os.Stderr
+				child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+				_ = child.Start()
+				continue
+			}
 			write(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "account/chatgptAuthTokens/refresh", "params": map[string]any{"reason": "unauthorized", "previousAccountId": account}})
 			if !s.Scan() {
 				return
@@ -212,5 +260,21 @@ func TestCodexAppServerCancellationKillsRunningProcess(t *testing.T) {
 	_, err = client.completeAppServer(ctx, Request{Messages: []Message{{Role: "user", Content: "x"}}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCodexAppServerCancellationClosesDetachedStdout(t *testing.T) {
+	client, err := newAppServer(Config{Command: os.Args[0], Model: "test", CodexAccountID: "account-a", CodexAuth: func(context.Context, CodexAuthRequest) (CodexAuthTokens, error) {
+		return CodexAuthTokens{AccessToken: "x", AccountID: "account-a", PlanType: "detached"}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = client.completeAppServer(ctx, Request{Messages: []Message{{Role: "user", Content: "x"}}})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("call did not terminate on cancellation: %v", err)
 	}
 }

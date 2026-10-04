@@ -124,3 +124,23 @@ func TestOpaqueProviderStateDoesNotCrossAccountsOrRestart(t *testing.T) {
 		t.Fatalf("opaque state isolation failed: %v", replayed)
 	}
 }
+
+func TestNativeRejectsInvalidCodexCLIProfileHomes(t *testing.T) {
+	home := t.TempDir()
+	for _, providers := range []map[string]model.Config{
+		{
+			"a": {Kind: "codex-cli", Model: "test", CodexHome: home},
+			"b": {Kind: "codex-cli", Model: "test", CodexHome: home},
+		},
+		{
+			"a": {Kind: "codex-cli", Model: "test"},
+		},
+	} {
+		if _, err := newNative(NativeOptions{Providers: providers}); err == nil {
+			t.Fatal("newNative accepted invalid Codex CLI profile homes")
+		}
+	}
+	if _, err := newNative(NativeOptions{Provider: model.Config{BaseURL: "https://provider.test/v1", Model: "test"}}); err != nil {
+		t.Fatalf("single provider initialization failed: %v", err)
+	}
+}

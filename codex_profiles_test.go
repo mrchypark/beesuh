@@ -102,7 +102,7 @@ func TestCodexProfilesSelectAndRefreshOnlyOwnedAccount(t *testing.T) {
 	refresh := map[string]int{}
 	opts := Options{DataDir: t.TempDir(), BackendID: "codex-profile-test", RequireIdentity: true, MaxConcurrent: 2, MaxWaiting: 2, Timeout: 10 * time.Second,
 		Authorize: func(context.Context, Principal) error { return nil },
-		Native:    &NativeOptions{Providers: map[string]model.Config{"codex": {Kind: "codex-app-server", Command: command, Model: "fixture"}}, DefaultProvider: "codex"},
+		Native:    &NativeOptions{Providers: map[string]model.Config{"codex": {Kind: "codex-app-server", Command: command, Model: "fixture"}}, DefaultProvider: "codex", TokenBudgetPolicy: TokenBudgetAdvisory},
 		ResolveCredential: func(_ context.Context, c Connection) (Credential, error) {
 			return Credential{AccountID: c.ID, CodexAuth: func(_ context.Context, request model.CodexAuthRequest) (model.CodexAuthTokens, error) {
 				if request.PreviousAccountID != "" && request.PreviousAccountID != c.ID {

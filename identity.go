@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mrchypark/beesuh/auth"
 	"github.com/mrchypark/beesuh/model"
@@ -18,7 +19,22 @@ var (
 	ErrUnauthenticated       = errors.New("beesuh: authenticated service identity required")
 	ErrForbidden             = errors.New("beesuh: access denied")
 	ErrConnectionUnavailable = errors.New("beesuh: connection requires authentication or was revoked")
+	errInvalidUTF8Identifier = errors.New("beesuh: identifiers must be valid UTF-8")
 )
+
+// resolverReentryKey marks a context handed to Options.ResolveCredential so
+// read-locked runtime entry points can refuse reentry before taking a nested
+// lock.
+type resolverReentryKey struct{}
+
+// rejectResolverReentry reports ErrResolverReentry when a credential resolver
+// calls back into a runtime method that takes the lifecycle lock.
+func rejectResolverReentry(ctx context.Context) error {
+	if ctx.Value(resolverReentryKey{}) != nil {
+		return ErrResolverReentry
+	}
+	return nil
+}
 
 // Principal is established by the hosting service, never by request JSON or
 // unverified identity headers. It deliberately contains no browser session/token.
@@ -46,6 +62,9 @@ func (r *Runtime) requirePrincipal(ctx context.Context) (Principal, error) {
 	p, ok := PrincipalFromContext(ctx)
 	if !ok || validIdentity(p.UserID, p.WorkspaceID) != nil || strings.ContainsAny(p.UserID+p.WorkspaceID, "\r\n") {
 		return Principal{}, ErrUnauthenticated
+	}
+	if !utf8.ValidString(p.UserID) || !utf8.ValidString(p.WorkspaceID) {
+		return Principal{}, errors.Join(ErrUnauthenticated, errInvalidUTF8Identifier, errors.New("beesuh: identity identifiers must be valid UTF-8"))
 	}
 	if !r.opts.RequireIdentity || r.opts.Authorize == nil {
 		return Principal{}, ErrForbidden
@@ -79,6 +98,17 @@ func (r *Runtime) scopedWorkspace(ctx context.Context, workspace string) (string
 	// All existing session, request, memory and journal keys use this namespace.
 	// JSON tuple encoding avoids delimiter collisions and hides raw identity in IDs.
 	return "user_" + digest([]string{p.UserID, p.WorkspaceID}), nil
+}
+
+// scopedWorkspaceForConnection maps a connection's stored workspace onto the
+// same namespace scopedWorkspace produces, without needing a request context.
+// The fence is keyed by that scoped name, so an identity-mode failure has to be
+// recorded against the namespace the request would have used.
+func (r *Runtime) scopedWorkspaceForConnection(c Connection) string {
+	if !r.opts.RequireIdentity {
+		return c.WorkspaceID
+	}
+	return "user_" + digest([]string{c.UserID, c.WorkspaceID})
 }
 
 func (r *Runtime) bindRequest(ctx context.Context, req *Request) error {
@@ -166,19 +196,33 @@ type Credential struct {
 // not call back into this connection's state mutation methods.
 func (r *Runtime) resolveCredential(ctx context.Context, c Connection) (credential Credential, err error) {
 	defer func() {
-		if err != nil {
+		if err != nil && !errors.Is(err, errInvalidUTF8Identifier) {
 			err = r.connectionAuthError(ctx, c, err)
 		}
 	}()
 	if r.opts.ResolveCredential == nil || c.CredentialRef == "" {
 		return Credential{}, ErrConnectionUnavailable
 	}
-	credential, err = r.opts.ResolveCredential(ctx, c)
+	// Run holds the lifecycle read lock across execution. A resolver that reads
+	// runtime state would nest a read lock behind a pending Close and deadlock.
+	if ctx.Err() != nil {
+		return Credential{}, ctx.Err()
+	}
+	if err := rejectResolverReentry(ctx); err != nil {
+		return Credential{}, err
+	}
+	if !utf8.ValidString(c.ID) || !utf8.ValidString(c.UserID) || !utf8.ValidString(c.WorkspaceID) || !utf8.ValidString(c.TargetID) || !utf8.ValidString(c.CredentialRef) {
+		return Credential{}, errors.Join(ErrConnectionUnavailable, errInvalidUTF8Identifier, errors.New("beesuh: connection identifiers must be valid UTF-8"))
+	}
+	credential, err = r.opts.ResolveCredential(context.WithValue(ctx, resolverReentryKey{}, true), c)
 	if err != nil {
 		return Credential{}, err
 	}
 	if validIdentity(credential.AccountID) != nil || strings.ContainsAny(credential.AccountID+credential.APIKey, "\r\n\x00") {
 		return Credential{}, ErrConnectionUnavailable
+	}
+	if !utf8.ValidString(credential.AccountID) {
+		return Credential{}, errors.Join(ErrConnectionUnavailable, errInvalidUTF8Identifier, errors.New("beesuh: credential account ID must be valid UTF-8"))
 	}
 	var base *http.Client
 	header := "Authorization"
@@ -228,6 +272,11 @@ func (r *Runtime) resolveCredential(ctx context.Context, c Connection) (credenti
 		if err != nil {
 			return Credential{}, ErrConnectionUnavailable
 		}
+	} else {
+		credential.HTTPClient, err = auth.HeaderClient(credential.HTTPClient, nil)
+		if err != nil {
+			return Credential{}, ErrConnectionUnavailable
+		}
 	}
 	credential.APIKey = ""
 	return credential, nil
@@ -245,7 +294,11 @@ func (r *Runtime) connectionAuthError(ctx context.Context, c Connection, err err
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if e := r.mutate(cleanup, []rhiza.SQLStatement{{SQL: `UPDATE connections SET state='needs_login',generation=generation+1 WHERE id=? AND generation=? AND state='ready'`, Args: []any{c.ID, c.Generation}, ExpectedRowsAffected: one()}}); e != nil {
-				r.blocked.Store(true)
+				// This is a connection-scoped obligation, not a workspace run
+				// fence. Nothing was dispatched and no active_request exists, so a
+				// workspace fence would be unliftable. Return ErrUncertain so the
+				// caller stops using this stale snapshot; the next request re-reads
+				// the authoritative connection through lookupConnection.
 				return ErrUncertain
 			}
 		}

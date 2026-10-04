@@ -80,6 +80,12 @@ type oauthTransport struct {
 }
 
 func (t *oauthTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	dispatched := false
+	defer func() {
+		if !dispatched && request != nil && request.Body != nil {
+			request.Body.Close()
+		}
+	}()
 	if err := t.validDestination(request); err != nil {
 		return nil, err
 	}
@@ -104,6 +110,7 @@ func (t *oauthTransport) RoundTrip(request *http.Request) (*http.Response, error
 	}
 	copyRequest.Header.Del("Authorization")
 	copyRequest.Header.Set("Authorization", "Bearer "+accessToken)
+	dispatched = true
 	response, err := transport(t.provider).RoundTrip(copyRequest)
 	if err != nil {
 		return nil, auth.Sanitize(err)

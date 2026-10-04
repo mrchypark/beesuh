@@ -235,13 +235,18 @@ OpenCode server와 해당 server의 model 설정이 필요하며 native memory/j
 handler bindings와 `CONDUCTOR_WORKSPACE_ID`를 OpenCode server 환경에 명시해야 한다.
 이 예제를 사용자별 gateway나 인증 위임으로 사용하면 안 된다.
 
-레거시 `conductor_emit`은 기본으로 비활성이다. 이 경로를 명시적으로 켜려면
-`CONDUCTOR_LEGACY_EMIT_UNSAFE=1`을 설정해야 한다. Conductor가 event를 받았는데
-acknowledgement가 사라지면, 이후 OpenCode message가 message id가 다른 새 key로
-중복 external effect를 만들 수 있다. 이 레거시 경로에는 durable unresolved-effect
-기록이 없다. consequential work에는 native tool boundary를 사용한다.
+레거시 `conductor_emit`은 모든 호출을 거절한다. 이전 대화에 저장된 tool 이름으로
+호출해도 Conductor에 요청을 보내지 않는다. 환경변수로 이 제한을 해제할 수 없다.
+외부 작업 전송에는 durable intent와 불확실성 기록을 관리하는 native tool boundary를
+사용한다. 레거시 `-conductor-tools`는 실행 상태 조회만 허용한다.
 
 ## 검증
+
+저장 한도에 도달하면 새 실행을 거절하고 기존 요청 ID와 불확실한 효과의 증거를 보존한다.
+기본값은 workspace별 run 10,000개, session·connection 1,000개이며, data directory의
+전체 한도도 적용한다. 기존 요청의 조회·재실행 결과 조회와 복구는 계속 가능하다.
+HTTP 용량 오류는 `503 storage_capacity`다. 설정과 디스크 관리 책임은
+[저장 정책](docs/uncertainty-and-retention-policy.md)에 있다.
 
 ```sh
 go test -race ./...

@@ -29,6 +29,7 @@ var (
 	ErrClosed       = errors.New("beesuh: runtime closed")
 	ErrInvalidInput = errors.New("beesuh: invalid input")
 	ErrNotFound     = errors.New("beesuh: run not found")
+	ErrCapacity     = errors.New("beesuh: retained capacity reached")
 	// ErrResolverReentry rejects a credential resolver that calls back into the
 	// runtime. Run holds the lifecycle read lock for the whole execution, so a
 	// nested read lock behind a pending Close would deadlock both operations and
@@ -74,6 +75,7 @@ type Options struct {
 	Permissions               []opencode.PermissionRule
 	MaxConcurrent, MaxWaiting int
 	Timeout                   time.Duration
+	Capacity                  CapacityLimits
 }
 
 type Request struct {
@@ -126,12 +128,17 @@ type Runtime struct {
 	// its POST is still in flight. Dispatch holds the read lock, resolution
 	// holds the write lock, so a fence row can only change disposition while no
 	// effect for it is being sent. Multiple dispatches stay concurrent.
-	fenceMu sync.RWMutex
-	mu      sync.Mutex
-	locks   map[string]*sessionLock
+	fenceMu  sync.RWMutex
+	mu       sync.Mutex
+	locks    map[string]*sessionLock
+	capacity CapacityLimits
 }
 
 func Open(ctx context.Context, opts Options) (*Runtime, error) {
+	if !opts.Capacity.valid() {
+		return nil, errors.New("beesuh: capacity limits cannot be negative")
+	}
+	opts.Capacity = opts.Capacity.withDefaults()
 	if opts.RequireIdentity {
 		if opts.Native == nil || opts.Authorize == nil || opts.ResolveCredential == nil {
 			return nil, errors.New("beesuh: service mode requires native backend, authorization and credential resolvers")
@@ -153,7 +160,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, errors.New("beesuh: named Conductor targets require service mode")
 	}
 
-	if opts.DataDir == "" || strings.TrimSpace(opts.BackendID) == "" || opts.MaxConcurrent < 1 || opts.MaxWaiting < 0 || opts.MaxConcurrent > 1024 || opts.MaxWaiting > 10000 {
+	if opts.DataDir == "" || strings.TrimSpace(opts.BackendID) == "" || len(opts.BackendID) > 256 || len(opts.OpenCode.Directory) > 4096 || opts.MaxConcurrent < 1 || opts.MaxWaiting < 0 || opts.MaxConcurrent > 1024 || opts.MaxWaiting > 10000 {
 		return nil, errors.New("beesuh: data directory, backend identity and bounded positive concurrency are required")
 	}
 	if opts.Timeout == 0 {
@@ -185,7 +192,11 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		if opts.Model != nil {
 			return nil, errors.New("beesuh: native model is configured through Native.Provider")
 		}
-		native, err = newNative(*opts.Native)
+		if opts.RequireIdentity {
+			native, err = newServiceNative(*opts.Native)
+		} else {
+			native, err = newNative(*opts.Native)
+		}
 		// Native conversations have no OpenCode working-directory dependency.
 		opts.OpenCode.Directory = ""
 	} else {
@@ -210,7 +221,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 		f.Close()
 		return nil, err
 	}
-	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock)}
+	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock), capacity: opts.Capacity}
 	r.profile = digest(opts.Permissions)
 	if native != nil {
 		r.profile = native.profile
@@ -218,9 +229,16 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	err = db.Migrate(ctx, []rhiza.Migration{{Version: 1, Name: "sessions-and-runs", Statements: []rhiza.SQLStatement{
 		{SQL: `CREATE TABLE sessions (workspace TEXT NOT NULL, session_key TEXT NOT NULL, backend TEXT NOT NULL, directory TEXT NOT NULL, profile TEXT NOT NULL, session_id TEXT NOT NULL, active_request TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,session_key))`},
 		{SQL: `CREATE TABLE runs (workspace TEXT NOT NULL, request_id TEXT NOT NULL, session_key TEXT NOT NULL, input_hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,request_id))`},
-	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration})
+	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration})
 	if err == nil {
 		err = r.pinIdentityMode(ctx)
+	}
+	if err == nil {
+		// This process exclusively owns the directory. startRun atomically
+		// creates a running row and removes its reservation before dispatch.
+		// Surviving reservations therefore represent pre-dispatch work only.
+		// Remote session creation has its own durable intent, which stays intact.
+		err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `DELETE FROM capacity_run_reservations`}})
 	}
 	if err == nil && native != nil {
 		// Reconcile effects that predate the uncertainty table before any
@@ -364,6 +382,15 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 			return Result{}, err
 		}
 	}
+	if err := r.reserveRun(ctx, req); err != nil {
+		return Result{}, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			r.releaseRunReservation(req)
+		}
+	}()
 	sessionID, err := r.session(ctx, req)
 	if err != nil {
 		return Result{}, err
@@ -373,13 +400,11 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 	// both effects committed (a running row plus active_request, which Recover
 	// discovers) or neither, with no external dispatch to reconcile. Installing a
 	// run fence here would strand the workspace with no evidence to lift it.
-	err = r.mutate(ctx, []rhiza.SQLStatement{
-		{SQL: `INSERT INTO runs(workspace,request_id,session_key,input_hash,state) VALUES(?,?,?,?,'running')`, Args: []any{req.WorkspaceID, req.RequestID, req.SessionKey, hash}},
-		{SQL: `UPDATE sessions SET active_request=? WHERE workspace=? AND session_key=? AND active_request=''`, Args: []any{req.RequestID, req.WorkspaceID, req.SessionKey}, ExpectedRowsAffected: one()},
-	})
+	err = r.startRun(ctx, req, hash)
 	if err != nil {
 		return Result{}, err
 	}
+	reserved = false
 	if r.native != nil {
 		return r.runNative(ctx, req, sessionID, schema)
 	}
@@ -589,7 +614,7 @@ func (r *Runtime) session(ctx context.Context, req Request) (string, error) {
 			}
 		}
 	}
-	err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO sessions(workspace,session_key,backend,directory,profile,session_id) VALUES(?,?,?,?,?,?)`, Args: []any{req.WorkspaceID, req.SessionKey, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, id}}})
+	err = r.insertSession(ctx, req, id, r.native == nil)
 	if err != nil && r.native == nil {
 		// The remote session exists but nothing durable points at it, so no later
 		// abort, recovery, or retention pass can ever reach it. Release it here.
@@ -707,7 +732,7 @@ func (r *Runtime) pendingCreateToken(ctx context.Context, req Request) (token, p
 		return rows[0][0].(string), rows[0][1].(string), rows[0][2].(string), true, nil
 	}
 	token = rand.Text()
-	err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO pending_session_creates(workspace,session_key,ownership_token,backend,directory,profile,phase,remote_id,recorded_at) VALUES(?,?,?,?,?,?,?,'',?) ON CONFLICT(workspace,session_key) DO NOTHING`, Args: []any{req.WorkspaceID, req.SessionKey, token, r.opts.BackendID, r.opts.OpenCode.Directory, r.profile, pendingPhaseCreating, time.Now().Unix()}}})
+	err = r.reservePendingCreate(ctx, req, token)
 	if err != nil {
 		return "", "", "", false, err
 	}
@@ -1004,9 +1029,15 @@ func (r *Runtime) mutate(ctx context.Context, statements []rhiza.SQLStatement) e
 		return err
 	}
 	if res.Status != rhiza.MutationCommitted {
-		return fmt.Errorf("beesuh: storage mutation rejected (%s)", res.ErrorCode)
+		return storageMutationError{code: res.ErrorCode}
 	}
 	return nil
+}
+
+type storageMutationError struct{ code string }
+
+func (e storageMutationError) Error() string {
+	return fmt.Sprintf("beesuh: storage mutation rejected (%s)", e.code)
 }
 
 func (r *Runtime) lockSession(ctx context.Context, key string) (func(), error) {

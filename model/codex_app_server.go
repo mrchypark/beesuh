@@ -271,7 +271,7 @@ func (r *appServerRPC) waitTurn(ctx context.Context, threadID, turnID string) (s
 		}
 		if method == "turn/completed" && nestedString(m, "params", "threadId") == threadID && nestedString(m, "params", "turn", "id") == turnID {
 			if nestedString(m, "params", "turn", "status") != "completed" {
-				return "", errors.New("model: Codex app-server turn failed")
+				return "", appServerTurnError(nested(m, "params", "turn", "error", "codexErrorInfo"))
 			}
 			if text := turnText(nested(m, "params", "turn", "items")); text != "" {
 				return text, nil
@@ -282,6 +282,28 @@ func (r *appServerRPC) waitTurn(ctx context.Context, threadID, turnID string) (s
 			return "", errors.New("model: Codex app-server produced no response")
 		}
 	}
+}
+
+// CodexErrorInfo uses camel-case variants on the wire. Classify only the
+// structured error, never its message or additionalDetails, which can contain
+// credentials. Unknown protocol errors remain ordinary model failures.
+func appServerTurnError(info any) error {
+	if kind, ok := info.(string); ok {
+		switch kind {
+		case "unauthorized":
+			return auth.ErrInvalidCredentials
+		case "rateLimitExceeded", "usageLimitExceeded":
+			return auth.ErrRateLimited
+		case "serverOverloaded", "internalServerError":
+			return auth.ErrUnavailable
+		}
+	}
+	for _, variant := range []string{"httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"} {
+		if status, ok := nested(info, variant, "httpStatusCode").(float64); ok && status == float64(int(status)) && status >= 400 && status <= 599 {
+			return auth.HTTPError{StatusCode: int(status)}
+		}
+	}
+	return errors.New("model: Codex app-server turn failed")
 }
 
 func (r *appServerRPC) serverRequest(ctx context.Context, m map[string]any) error {

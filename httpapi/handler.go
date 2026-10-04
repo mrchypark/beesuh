@@ -382,7 +382,7 @@ func failureStatus(category string) int {
 		return http.StatusForbidden
 	case beesuh.FailureRateLimited, beesuh.FailureOverloaded:
 		return http.StatusTooManyRequests
-	case beesuh.FailureServiceUnavailable:
+	case beesuh.FailureServiceUnavailable, beesuh.FailureStorageCapacity:
 		return http.StatusServiceUnavailable
 	case beesuh.FailureDeadlineExceeded:
 		return http.StatusGatewayTimeout
@@ -413,6 +413,8 @@ func storedFailure(category string) error {
 		return auth.ErrUnavailable
 	case beesuh.FailureOverloaded:
 		return beesuh.ErrOverloaded
+	case beesuh.FailureStorageCapacity:
+		return beesuh.ErrCapacity
 	case beesuh.FailureDeadlineExceeded:
 		return context.DeadlineExceeded
 	default:

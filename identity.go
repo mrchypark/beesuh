@@ -242,7 +242,7 @@ func (r *Runtime) resolveCredential(ctx context.Context, c Connection) (credenti
 			return Credential{}, ErrConnectionUnavailable
 		}
 		if cfg.Kind == "codex-cli" {
-			if credential.HTTPClient != nil || credential.APIKey != "" || !filepath.IsAbs(credential.CodexHome) || strings.ContainsAny(credential.CodexHome, "\r\n\x00") {
+			if credential.HTTPClient != nil || credential.APIKey != "" || !filepath.IsAbs(credential.CodexHome) || !utf8.ValidString(credential.CodexHome) || strings.ContainsAny(credential.CodexHome, "\r\n\x00") {
 				return Credential{}, ErrConnectionUnavailable
 			}
 			return credential, nil

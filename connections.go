@@ -115,6 +115,9 @@ func (r *Runtime) RegisterConnection(ctx context.Context, c Connection) error {
 		}
 		return errors.Join(ErrConflict, errors.New("beesuh: connection ID already belongs to another target"))
 	}
+	if err := r.connectionCapacityAvailable(ctx, c.WorkspaceID); err != nil {
+		return err
+	}
 	if c.State == "ready" {
 		// Validate before insertion; a new connection has no persisted state to
 		// invalidate if the service cannot resolve its account.
@@ -124,13 +127,38 @@ func (r *Runtime) RegisterConnection(ctx context.Context, c Connection) error {
 			return err
 		}
 	}
-	statements := []rhiza.SQLStatement{{SQL: `INSERT INTO connections(id,user_id,workspace_id,kind,target_id,credential_ref,state,generation) VALUES(?,?,?,?,?,?,?,?)`, Args: []any{c.ID, c.UserID, c.WorkspaceID, c.Kind, c.TargetID, c.CredentialRef, c.State, c.Generation}}}
+	statements := []rhiza.SQLStatement{{SQL: `INSERT INTO connections(id,user_id,workspace_id,kind,target_id,credential_ref,state,generation)
+SELECT ?,?,?,?,?,?,?,?
+WHERE (SELECT COUNT(*) FROM connections WHERE workspace_id=?) < ?
+  AND (SELECT COUNT(*) FROM connections) < ?`, Args: []any{c.ID, c.UserID, c.WorkspaceID, c.Kind, c.TargetID, c.CredentialRef, c.State, c.Generation, c.WorkspaceID, r.capacity.ConnectionsPerWorkspace, r.capacity.ConnectionsGlobal}, ExpectedRowsAffected: one()}}
 	if c.State == "revoked" {
 		// Trusted provisioning declares an already-terminal connection, just as
 		// the legacy backfill does. Persist confirmation in the same transaction.
 		statements = append(statements, rhiza.SQLStatement{SQL: `INSERT INTO connection_revocations(connection_id,generation,state) VALUES(?,?,'confirmed')`, Args: []any{c.ID, c.Generation}})
 	}
-	return r.mutate(ctx, statements)
+	err = r.mutate(ctx, statements)
+	if capacityRejected(err) {
+		return r.capacityError(ctx, "connections", c.WorkspaceID, r.capacity.ConnectionsPerWorkspace, r.capacity.ConnectionsGlobal, "connections", "")
+	}
+	return err
+}
+
+func (r *Runtime) connectionCapacityAvailable(ctx context.Context, workspace string) error {
+	rows, err := r.query(ctx, `SELECT COUNT(*) FROM connections WHERE workspace_id=?`, workspace)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 1 && rows[0][0].(int64) >= int64(r.capacity.ConnectionsPerWorkspace) {
+		return &CapacityError{Resource: "connections per workspace", Limit: r.capacity.ConnectionsPerWorkspace}
+	}
+	rows, err = r.query(ctx, `SELECT COUNT(*) FROM connections`)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 1 && rows[0][0].(int64) >= int64(r.capacity.ConnectionsGlobal) {
+		return &CapacityError{Resource: "connections global", Limit: r.capacity.ConnectionsGlobal}
+	}
+	return nil
 }
 
 // Connections returns only connections owned by the authenticated principal.

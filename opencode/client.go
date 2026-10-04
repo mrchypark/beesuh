@@ -24,10 +24,14 @@ const (
 )
 
 type Config struct {
-	BaseURL    string
-	Directory  string
-	Username   string
-	Password   string
+	BaseURL   string
+	Directory string
+	Username  string
+	Password  string
+	// Timeout bounds requests made with a context that has no deadline. A
+	// zero value uses the default 60-second timeout. A caller-provided
+	// deadline always takes precedence.
+	Timeout    time.Duration
 	HTTPClient *http.Client
 }
 
@@ -36,6 +40,7 @@ type Client struct {
 	directory string
 	username  string
 	password  string
+	timeout   time.Duration
 	http      *http.Client
 }
 
@@ -89,6 +94,9 @@ func (m Message) StructuredOutput() (json.RawMessage, error) {
 }
 
 func New(cfg Config) (*Client, error) {
+	if cfg.Timeout < 0 {
+		return nil, errors.New("opencode: Timeout must not be negative")
+	}
 	u, err := url.Parse(cfg.BaseURL)
 	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("opencode: BaseURL must be an absolute HTTP URL without credentials, query, or fragment")
@@ -104,7 +112,11 @@ func New(cfg Config) (*Client, error) {
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return errors.New("opencode: redirects are disabled")
 	}
-	return &Client{baseURL: u, directory: cfg.Directory, username: cfg.Username, password: cfg.Password, http: &copy}, nil
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+	return &Client{baseURL: u, directory: cfg.Directory, username: cfg.Username, password: cfg.Password, timeout: timeout, http: &copy}, nil
 }
 
 func (c *Client) CreateSession(ctx context.Context, title string, permission []PermissionRule) (string, error) {
@@ -271,7 +283,7 @@ func (c *Client) call(ctx context.Context, method, endpoint string, body any, di
 	if ctx != nil {
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+			ctx, cancel = context.WithTimeout(ctx, c.timeout)
 			defer cancel()
 		}
 	}

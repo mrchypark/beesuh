@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -180,6 +181,61 @@ func TestNewAddsDeadlineForZeroTimeoutBaseClient(t *testing.T) {
 	}
 	if !deadlines[1].Equal(callerDeadline) {
 		t.Fatalf("caller deadline = %v, got %v", callerDeadline, deadlines[1])
+	}
+}
+
+func TestNewRejectsNegativeTimeout(t *testing.T) {
+	if _, err := New(Config{BaseURL: "https://example.test", Directory: "/work", Timeout: -time.Second}); err == nil {
+		t.Fatal("New accepted a negative timeout")
+	}
+}
+
+func TestHealthUsesConfiguredFallbackTimeoutWithoutRetry(t *testing.T) {
+	var dispatches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dispatches.Add(1)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	c, err := New(Config{BaseURL: server.URL, Directory: "/work", Timeout: 250 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = c.Health(context.Background())
+	if elapsed := time.Since(started); elapsed >= 3*time.Second {
+		t.Fatalf("Health took too long: %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Health error = %v", err)
+	}
+	if got := dispatches.Load(); got != 1 {
+		t.Fatalf("dispatches = %d, want 1", got)
+	}
+}
+
+func TestPromptUsesConfiguredFallbackTimeoutWithoutRetry(t *testing.T) {
+	var dispatches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dispatches.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	c, err := New(Config{BaseURL: server.URL, Directory: "/work", Timeout: 250 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = c.Prompt(context.Background(), "ses_1", Prompt{Text: "hello"})
+	if elapsed := time.Since(started); elapsed >= 3*time.Second {
+		t.Fatalf("Prompt took too long: %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Prompt error = %v", err)
+	}
+	if got := dispatches.Load(); got != 1 {
+		t.Fatalf("dispatches = %d, want 1", got)
 	}
 }
 

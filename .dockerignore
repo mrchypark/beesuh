@@ -1,0 +1,24 @@
+# Allow only build inputs. Credentials and local Rhiza state stay outside the context.
+*
+!Dockerfile
+!go.mod
+!go.sum
+!*.go
+!cmd/
+!cmd/beesuh/
+!cmd/beesuh/*.go
+!auth/
+!auth/*.go
+!compos/
+!compos/*.go
+!conductor/
+!conductor/*.go
+!goauthy/
+!goauthy/*.go
+!httpapi/
+!httpapi/*.go
+!model/
+!model/*.go
+!opencode/
+!opencode/*.go
+**/*_test.go

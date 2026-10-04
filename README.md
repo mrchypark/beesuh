@@ -16,6 +16,36 @@ Compos 데이터 ────┼─ Beesuh ─ OpenAI 호환 모델 API
 실제 OAuth/Codex 계정 연동 및 Compos 전체 워크플로의 완료를 의미하지 않는다.
 [통합 범위와 검증 한계](docs/local-integration-status.md)를 참고한다.
 
+## Docker 이미지
+
+이미지는 Linux amd64, UID/GID `10001`로 실행한다. `/data`에는 Rhiza 실행·대화
+데이터가 저장되므로 영속 볼륨을 연결한다. 같은 데이터 디렉터리는 하나의 Beesuh
+인스턴스만 사용한다. 호스트 디렉터리를 연결할 때는 UID `10001`의 쓰기 권한이 필요하다.
+
+```sh
+# BEESUH_IMAGE에는 CI가 게시한 이미지 경로와 태그를 넣는다.
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v beesuh-data:/data \
+  -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
+  "$BEESUH_IMAGE"
+```
+
+다중 provider registry는 읽기 전용으로 연결하고 기본 실행 인자를 함께 지정한다.
+
+```sh
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v beesuh-data:/data \
+  -v "$PWD/examples/providers-go.json:/config/providers.json:ro" \
+  -e BEESUH_API_TOKEN -e OPENCODE_GO_WORK_API_KEY \
+  "$BEESUH_IMAGE" \
+  -listen 0.0.0.0:8080 -data-dir /data -providers /config/providers.json
+```
+
+이미지는 HTTP provider를 직접 호출하는 native 런타임을 포함한다. Codex CLI
+provider에는 별도로 고정한 Alpine 호환 `codex` 실행 파일과 프로파일을 제공해야 한다.
+OpenCode backend에는 외부 OpenCode 서버의 URL을 지정한다. 설정과 자격증명은
+이미지에 넣지 않고 실행 환경으로 제공한다.
+
 ## 실행
 
 Go 1.27+가 필요하다. Rhiza는 공개 버전 `v0.18.0`으로 고정한다. 모델 URL에는 OpenAI 호환 API의 `/v1` base URL을 넣는다. 클라이언트가

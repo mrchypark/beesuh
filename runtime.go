@@ -911,6 +911,16 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
 	defer cancel()
+	// One unresolved run must not prevent settlement of independent session
+	// obligations, including when no new run slot can be admitted. Settle these
+	// first so a failed abort cannot consume their whole recovery budget.
+	sessionErr := r.recoverSessionCreates(ctx)
+	runErr := r.recoverRuns(ctx)
+	return errors.Join(runErr, sessionErr)
+}
+
+// recoverRuns requires the exclusive lifecycle lock held by Recover.
+func (r *Runtime) recoverRuns(ctx context.Context) error {
 	// Order the scan so one recovery attempt settles workspaces in a fixed
 	// sequence. Each workspace is unfenced as soon as its own runs are persisted,
 	// and a deterministic order keeps that sequence reproducible when a later
@@ -965,7 +975,7 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	if unresolved {
 		return errors.Join(ErrUncertain, errors.New("beesuh: running work remains without a recoverable session"))
 	}
-	return r.recoverSessionCreates(ctx)
+	return nil
 }
 
 // clearCompletedRunFence requires the caller to hold life exclusively. A failed

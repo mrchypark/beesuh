@@ -234,7 +234,9 @@ that survives a committed mapping is cleared after an authoritative mapping
 lookup. An unreadable lookup preserves both the intent and remote session.
 
 Explicit `Recover` also settles existing creation and cleanup intents without
-allocating a run slot or sending a prompt. It can adopt one uniquely matching
+allocating a run slot or sending a prompt. It attempts session-intent settlement
+before run interruption, so an unresolved run or failed abort cannot skip
+independent session obligations. Both recovery errors are retained. It can adopt one uniquely matching
 owned session into its reserved mapping slot, or confirm cleanup of an unreferenced
 known remote ID. Full or lowered admission limits do not block this settlement.
 An empty or ambiguous lookup remains uncertain; recovery never creates a

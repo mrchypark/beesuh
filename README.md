@@ -1,244 +1,285 @@
-# beesuh
+# Beesuh
 
-Beesuh는 Go 개인 비서 런타임이다. 기본 엔진은 OpenAI 호환 Chat Completions
-API를 직접 호출하므로 별도 에이전트 서버 설치가 필요 없다. 사용자 CLI와 HTTP
-입력은 같은 `(workspace_id, session_key)` 대화로 들어온다.
+**대화를 이어 가고, 필요한 메모를 저장하는 Go 개인 비서 런타임입니다.**
 
-```text
-사용자 CLI / HTTP ─ Beesuh ─ 모델 provider
-                     ├─ Rhiza: 실행, journal, 선택 memory
-                     └─ 선택 도구: memory, 정적 skill 읽기
-```
+Beesuh는 모델 API를 직접 호출하고 대화와 실행 기록을 로컬에 보관합니다.
+터미널에서 대화하거나 HTTP API로 연결할 수 있으며, Go 애플리케이션에 런타임을
+내장할 수도 있습니다. 기본 `native` 엔진은 별도의 에이전트 서버 없이 실행됩니다.
 
-현재 범위는 임베딩 가능한 런타임과 운영자용 CLI/HTTP다. 사용자 로그인 서버,
-실제 OAuth/Codex 계정 연동의 완료를 의미하지 않는다.
-[통합 범위와 검증 한계](docs/local-integration-status.md)를 참고한다.
+## 주요 기능
 
-## Docker 이미지
+- **이어지는 대화**: 같은 workspace와 session으로 요청하면 최근 성공한 대화를 문맥으로 복원합니다.
+- **모델 선택**: OpenAI 호환 Chat Completions, Responses, Anthropic Messages와 Codex CLI를 지원합니다. 이름을 붙인 provider를 요청마다 선택할 수 있습니다.
+- **선택적 메모와 스킬**: 대화별 메모를 저장·조회·삭제하고, 설치한 Markdown 스킬을 모델이 읽도록 할 수 있습니다.
+- **실행 기록과 중복 요청 처리**: Rhiza에 실행 결과와 대화 기록을 저장합니다. 같은 요청 ID와 입력을 다시 보내면 저장된 결과를 반환합니다.
+- **CLI·HTTP·Go 라이브러리**: 개인용 실행에서 시작해, 인증과 사용자별 연결을 갖춘 서비스에 내장할 수 있습니다.
 
-`main`의 CI가 Go·race·Bun·컨테이너 검사를 모두 통과하면
-`ghcr.io/mrchypark/beesuh` 이미지를 GitHub Container Registry에 빌드·푸시한다.
-`ci` 워크플로를 `main`에서 수동 실행해도
-같은 검사를 거쳐 게시한다. PR에서는 이미지를 빌드하고 실행만 검증한다.
-게시 태그는 `latest`와 전체 커밋 SHA다. 게시에는 `packages: write` 권한을 가진
-워크플로의 `GITHUB_TOKEN`을 사용한다.
+현재 제공하는 것은 런타임과 CLI·HTTP API입니다. 웹 UI나 사용자 로그인 서버,
+자동 스케줄러는 포함하지 않습니다.
 
-이미지는 Linux amd64, UID/GID `10001`로 실행한다. `/data`에는 Rhiza 실행·대화
-데이터가 저장되므로 영속 볼륨을 연결한다. 같은 데이터 디렉터리는 하나의 Beesuh
-인스턴스만 사용한다. 호스트 디렉터리를 연결할 때는 UID `10001`의 쓰기 권한이 필요하다.
+## 빠르게 시작하기
+
+소스에서 실행하려면 **Go 1.27 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
+필요합니다. 메모·스킬 도구를 사용하려면 모델이 tool calling도 지원해야 합니다.
 
 ```sh
-BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:latest
-docker pull "$BEESUH_IMAGE"
-docker run --rm -p 127.0.0.1:8080:8080 \
-  -v beesuh-data:/data \
-  -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
-  "$BEESUH_IMAGE"
-```
+git clone https://github.com/mrchypark/beesuh.git
+cd beesuh
 
-로컬에서 이미지를 빌드하려면 다음 명령을 사용한다.
-
-```sh
-docker build --platform linux/amd64 -t beesuh:local .
-BEESUH_IMAGE=beesuh:local
-```
-
-다중 provider registry는 읽기 전용으로 연결하고 기본 실행 인자를 함께 지정한다.
-
-```sh
-docker run --rm -p 127.0.0.1:8080:8080 \
-  -v beesuh-data:/data \
-  -v "$PWD/examples/providers-go.json:/config/providers.json:ro" \
-  -e BEESUH_API_TOKEN -e OPENCODE_GO_WORK_API_KEY \
-  "$BEESUH_IMAGE" \
-  -listen 0.0.0.0:8080 -data-dir /data -providers /config/providers.json
-```
-
-이미지는 HTTP provider를 직접 호출하는 native 런타임을 포함한다. Codex CLI
-provider에는 별도로 고정한 Alpine 호환 `codex` 실행 파일과 프로파일을 제공해야 한다.
-OpenCode backend에는 외부 OpenCode 서버의 URL을 지정한다. 설정과 자격증명은
-이미지에 넣지 않고 실행 환경으로 제공한다.
-
-## 실행
-
-Go 1.27+가 필요하다. Rhiza는 공개 버전 `v0.18.0`으로 고정한다. 모델 URL에는 OpenAI 호환 API의 `/v1` base URL을 넣는다. 클라이언트가
-`/chat/completions`를 붙인다. 모델은 tool calling을 지원해야 도구를 사용할 수 있다.
-
-```sh
 export BEESUH_MODEL_URL='https://model.example/v1'
 export BEESUH_MODEL='your-model-id'
 export BEESUH_MODEL_API_KEY='your-api-key'
 
 go run ./cmd/beesuh \
-  -model-url "$BEESUH_MODEL_URL" -model "$BEESUH_MODEL" \
-  -workspace personal -session chat-1 -request-id first \
-  -message '안녕, 오늘 할 일을 정리해 줘.'
-```
-
-API key가 없는 local endpoint라면 `BEESUH_MODEL_API_KEY`는 비워 둘 수 있다.
-같은 workspace/session의 성공한 최근 turn은 다음 요청의 context로 복원한다.
-`(workspace_id, request_id)`는 멱등 키다. 같은 입력 재전송은 저장 결과를
-반환하고, 다른 입력으로 재사용하면 충돌한다.
-
-### 이름 있는 provider
-
-여러 계정·provider는 JSON registry로 선언한다. credential은 파일에 쓰지 않고
-`api_key_env`로 환경 변수 이름만 참조한다. 예시는
-[단일 계정 예제](examples/providers-go.json), [다중 계정 구성](examples/providers.json)과
-[provider 문서](docs/providers.md)에 있다. 다중 사용자 서비스는 provider/connector
-연결을 사용자·workspace에 등록하고, 요청마다 `connection_id`를 지정한다. 설정과
-embedding 방식은 [connection 관리](docs/connections-design.md)를 참고한다.
-
-다중 계정 구성은 등록한 모든 `api_key_env`의 환경 변수를 요구한다.
-
-```sh
-export OPENCODE_GO_WORK_API_KEY='set-outside-the-file'
-go run ./cmd/beesuh -providers examples/providers-go.json -provider go-work \
-  -interactive -workspace personal -session chat-1
-
-go run ./cmd/beesuh -providers examples/providers-go.json -provider go-work \
-  -workspace personal -session chat-1 -request-id first \
-  -message '오늘 일을 정리해 줘.'
-```
-
-`-provider`를 생략하면 registry의 `default`를 사용한다. 같은 session의 history는
-선택한 provider로 계속 보낸다. provider alias를 바꾸는 것은 의도적으로 같은 대화의
-다음 turn을 다른 model에 보내는 동작이다. OpenCode Zen을 쓰려면 registry에
-`kind: "opencode-zen"`, `api: "responses"`, model `gpt-5.3-codex`,
-`api_key_env: "OPENCODE_ZEN_WORK_API_KEY"`처럼 추가하고 key는 환경에서 provision한다.
-Zen model별 wire는 다르며 Gemini wire는 현재 구현하지 않았다.
-
-### 직접 대화
-
-```sh
-go run ./cmd/beesuh \
-  -model-url "$BEESUH_MODEL_URL" -model "$BEESUH_MODEL" \
   -interactive -workspace personal -session chat-1
 ```
 
-`/quit`까지 같은 session을 유지한다. HTTP 서버는 private service bearer token이
-필요하다.
+위 URL·모델 ID·API key는 사용 중인 provider의 값으로 바꿉니다.
+`BEESUH_MODEL_URL`에는 Chat Completions API의 base URL을 넣습니다.
+클라이언트가 `/chat/completions`를 붙이므로 전체 endpoint를 넣지 않습니다.
+인증이 없는 로컬 모델 서버라면 API key 환경 변수를 설정하지 않아도 됩니다.
+
+메시지를 한 줄씩 입력하고 `/quit`으로 종료합니다. 응답은 JSON으로 출력됩니다.
+다시 실행할 때 같은 workspace와 session을 사용하면 대화가 이어집니다.
+데이터는 기본적으로 현재 디렉터리의 `.beesuh`에 저장됩니다.
+
+한 번만 요청하려면 다음과 같이 실행합니다.
 
 ```sh
-export BEESUH_API_TOKEN='replace-with-private-service-token'
 go run ./cmd/beesuh \
-  -model-url "$BEESUH_MODEL_URL" -model "$BEESUH_MODEL" \
-  -listen 127.0.0.1:8080
+  -workspace personal -session chat-1 -request-id task-1 \
+  -message '오늘 할 일을 세 항목으로 정리해 줘.'
+```
 
+새 요청에는 새 `request-id`를 사용합니다. `(workspace_id, request_id)`는 중복 요청을
+판별하는 키이며, 같은 ID를 다른 입력에 재사용하면 충돌합니다.
+
+## HTTP API로 사용하기
+
+모델 환경 변수는 빠른 시작과 동일합니다. 추가로 운영자용 bearer token을 설정합니다.
+
+```sh
+export BEESUH_API_TOKEN='replace-with-a-long-random-private-token'
+go run ./cmd/beesuh -listen 127.0.0.1:8080
+```
+
+서버가 실행 중인 상태에서 **다른 터미널**에 같은 `BEESUH_API_TOKEN`을 설정한 뒤
+요청합니다. 서버와 CLI가 같은 데이터 디렉터리를 동시에 사용해서는 안 됩니다.
+
+```sh
 curl http://127.0.0.1:8080/v1/chat \
   -H "Authorization: Bearer $BEESUH_API_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"workspace_id":"personal","session_key":"chat-1","request_id":"second","message":"방금 말한 일을 세 항목으로 줄여 줘."}'
+  -d '{"workspace_id":"personal","session_key":"chat-1","request_id":"http-1","message":"오늘 할 일을 정리해 줘."}'
 ```
 
-이 token은 신뢰된 운영자/서비스용이다. token 보유자는 이 런타임의 workspace와
-session을 선택할 수 있다. 다중 사용자 서비스는 이 handler 대신 서비스가 검증한
-`Principal`을 받는 `httpapi.NewAuthenticated`를 사용한다. service mode에서는
-`connection_id`가 필수이며, 대화·run·history·memory는 사용자와 workspace로 분리된다.
+다음 API도 같은 bearer token을 요구합니다.
 
-### 조회 API
+| API | 용도 |
+| --- | --- |
+| `GET /v1/status` | 실행·대기·차단 상태와 backend를 조회합니다. |
+| `GET /v1/providers` | provider ID·종류·프로토콜·모델·기본값을 조회합니다. 비밀 설정은 반환하지 않습니다. |
+| `GET /v1/history?workspace_id=personal&session_key=chat-1` | native 대화의 최근 journal 기록을 최대 200개 조회합니다. |
+| `GET /v1/runs/http-1?workspace_id=personal` | 요청의 실행 상태와 결과를 조회합니다. |
 
-모두 bearer token이 필요하다.
+**이 토큰은 신뢰된 운영자·서비스용입니다.** 토큰 보유자는 workspace와 session을
+선택하고 기록을 조회할 수 있습니다. 사용자별 권한을 구분하는 로그인 토큰이 아닙니다.
+외부에 제공하는 다중 사용자 서비스는 검증한 `Principal`을 받는
+`httpapi.NewAuthenticated`와 사용자·workspace 권한 검사, 연결별 credential resolver를
+구현해야 합니다. 이 모드에서는 `connection_id`가 필수이며 연결 등록은 서비스의
+신뢰된 코드에서 수행합니다. 자세한 계약은 [연결 관리](docs/connections-design.md)를 참고하세요.
 
-- `GET /v1/status`: local active/queued/blocked 상태와 backend.
-- `GET /v1/providers`: 이름, kind, API protocol, model, default만 반환한다. URL,
-  credential 환경 변수명, API key, Codex auth directory는 반환하지 않는다.
-- `GET /v1/history?workspace_id=...&session_key=...`: native backend의 최근
-  200개 journal record. 입력과 모델·도구 결과가 포함될 수 있다.
-- `GET /v1/runs/{request_id}?workspace_id=...`: 실행 결과 또는 `running` 상태.
+## Docker로 실행하기
 
-### 서비스 사용자 연결
-
-service mode의 `GET /v1/connections`는 현재 사용자가 소유한 연결만 보이며,
-`DELETE /v1/connections/{connection_id}`는 해당 연결을 terminal `revoked`로 전환한다.
-`GET /v1/providers`는 사용 가능한 provider마다 자신의 `connection_id`만 포함한다.
-연결 등록은 public HTTP API가 아니다. 서비스의 신뢰된 provisioning 경로에서만
-`Runtime.RegisterConnection`을 호출한다. service mode는 user/workspace authorization과
-connection별 credential resolver를 함께 요구하며, credential은 Rhiza에 저장하지 않는다.
-새 resolver는 서비스 secret store가 만든 connection-scoped `Credential.HTTPClient`와
-nonsecret `AccountID`를 반환한다. OAuth token 갱신·저장은 그 client의 transport가 담당한다;
-API key 입력은 기존 resolver 호환용으로만 지원한다.
-상세 계약은
-[connection 관리](docs/connections-design.md)에 있다.
-
-## 선택 기능
-
-`-memory`는 대화별 name/content note 저장을 켠다. 모델은 명시적 사용자 요청일 때만
-`memory_save`를 호출하도록 지시받고 최대 64개 note를 저장한다.
-`memory_forget`은 활성 note만 삭제한다. 과거 journal/transcript와 완료 run에는
-내용이 남을 수 있으므로 전체 데이터 삭제 기능이 아니다.
-
-`-skills-dir`는 operator가 설치한 regular `name.md` 파일(최대 32개, 각 8 KiB)을
-정적으로 읽는다. 모델은 `load_skill`로 내용을 읽을 수 있지만 skill은 권한을
-부여하지 않는다.
-
-독립 실행에서는 위 도구만 선택적으로 사용한다. 외부 작업 실행 서비스는 제공하지 않는다.
-
-## 저장, 제한, 실패
-
-Rhiza는 실행 상태, native session journal, 선택 memory를 저장한다. credentials와
-모델 API key는 저장하지 않는다. 한 data directory는 한 프로세스만 사용할 수 있다.
-같은 session은 직렬 실행되고, 전체 active slot/waiting queue는
-`-max-concurrent`/`-max-waiting`으로 제한된다. 기본 native loop는 최대 12
-model/tool turn, 64 KiB context, 2,048 output token이다.
-
-native 입력은 12 KiB, JSON 인코딩된 user message는 24 KiB까지다. 답변은
-16 KiB, journal record는 24 KiB까지 저장한다. 큰 도구 결과는 원문 대신
-`output_omitted`와 digest를 기록한다. context에는 최근 성공한 8개 turn 중
-예산에 맞는 전체 turn만 넣으며, 저장된 원본 journal은 삭제하지 않는다.
-
-외부 효과를 다루는 기존 adapter 경로는 intent를 먼저 기록한다. 전송 확인을
-못 하면 `uncertain`으로 끝내고 자동 재시도·자동 side-effect replay를 하지 않는다.
-이 경우 해당 workspace의 새 외부 효과는 durable 기록이 남아 있는 동안 차단된다.
-재시작·새 session·새 connection으로 우회할 수 없다. 조회와 명시적 복구는 계속 가능하다.
-레거시 OpenCode에서 도구를 허용한 세션은 prompt 또는 응답 검증 실패 시에도
-`uncertain`으로 차단한다. abort 성공은 이미 실행된 외부 효과가 없다는 증거가 아니다.
-`-recover`는 미완료 실행을 `interrupted`로 기록하며 외부 효과를 되돌리지 않는다.
-서버를 멈추고 같은 data directory와 도구/스킬 설정으로 실행한다. 먼저 journal과
-외부 작업 상태를 확인해야 하며, 복구 이후 새 request ID로 같은 작업을 보내면
-외부 작업이 중복될 수 있다. 기존 OpenCode session을 native로 자동 이관하지 않는다.
-
-SSE/streaming, 일반 MCP, 동적 tool, 자동 요약/vector memory, per-call approval, UI,
-자동 scheduler는 아직 없다. 채택 범위는
-[Kronos adoption record](docs/kronos-adoption.md)에 있다.
-
-## 레거시 OpenCode backend
-
-기존 OpenCode session wrapper는 `-backend opencode`로 선택할 수 있다. 이 경로에는
-OpenCode server와 해당 server의 model 설정이 필요하며 native memory/journal history는
-제공하지 않는다. 새 배포는 native backend를 사용한다.
-
-## 검증
-
-저장 한도에 도달하면 새 실행을 거절하고 기존 요청 ID와 불확실한 효과의 증거를 보존한다.
-기본값은 workspace별 run 10,000개, session·connection 1,000개이며, data directory의
-전체 한도도 적용한다. 기존 요청의 조회·재실행 결과 조회와 복구는 계속 가능하다.
-HTTP 용량 오류는 `503 storage_capacity`다. 설정과 디스크 관리 책임은
-[저장 정책](docs/uncertainty-and-retention-policy.md)에 있다.
+Go 설치 없이 실행하려면 `ghcr.io/mrchypark/beesuh` 이미지를 사용합니다.
+빠른 시작의 모델 환경 변수와 위의 `BEESUH_API_TOKEN`을 먼저 설정하세요.
 
 ```sh
-go test -race ./...
-go vet ./...
-go build ./cmd/beesuh
+BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:latest
+docker pull --platform linux/amd64 "$BEESUH_IMAGE"
+docker run --rm --platform linux/amd64 \
+  -p 127.0.0.1:8080:8080 \
+  -v beesuh-data:/data \
+  -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL \
+  -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
+  "$BEESUH_IMAGE"
 ```
 
+위 HTTP 요청 예제로 대화할 수 있습니다. 이미지는 Linux amd64용이며,
+`main`의 CI 검사를 통과한 빌드에 `latest`와 전체 커밋 SHA 태그를 게시하도록
+설정되어 있습니다. 배포 버전을 고정하려면 `latest` 대신 커밋 SHA를 사용하세요.
 
-현재 독립 실행 범위와 선택적 인증 adapter의 검증 한계는
-[로컬 통합 상태](docs/local-integration-status.md)에 구분해 기록했다.
+컨테이너는 UID/GID `10001`로 실행합니다. `/data` 볼륨에는 대화와 실행 기록이
+남습니다. 호스트 디렉터리를 연결한다면 해당 UID의 쓰기 권한이 필요합니다.
+같은 볼륨은 한 인스턴스만 사용하세요.
 
-GoAuthy에서 연결한 여러 Codex 계정을 선택해 사용하는 consumer 격리와 실험적 app-server
-인증은 [Codex 프로파일](docs/codex-profiles.md)에 설명했다.
-같은 사용자의 여러 API-key 계정을 선택하는 인증 client 주입과 TLS 검증은
-[GoAuthy credential delivery](docs/goauthy-api-key-delivery.md)에 설명했다.
-OAuth access-token의 명시적 주입과 refresh 버전 검증은
-[OAuth delivery](docs/goauthy-oauth-delivery.md)를 따른다.
-
-### 로컬 Rhiza 개발
-
-동시 개발할 때만 로컬 workspace를 사용한다. 이 파일은 커밋하지 않는다.
+로컬 빌드는 다음 명령을 사용합니다.
 
 ```sh
-go work init . ../../project/rhiza
+docker build --platform linux/amd64 -t beesuh:local .
 ```
 
-릴리스 검증은 `GOWORK=off go test -race ./...`로 고정된 의존성을 사용한다.
+이후 실행 예제의 `BEESUH_IMAGE`를 `beesuh:local`로 바꾸면 됩니다.
+이미지에는 Codex CLI가 포함되어 있지 않습니다. `codex-cli` provider를 컨테이너에서
+사용하려면 Alpine 호환 실행 파일과 로그인 프로파일을 별도로 제공해야 합니다.
+
+## 모델과 계정 설정
+
+단일 Chat Completions 설정은 환경 변수나 `-model-url`, `-model`로 지정합니다.
+여러 모델·계정 또는 다른 프로토콜을 사용하려면 JSON provider registry를 지정합니다.
+
+```sh
+export OPENCODE_GO_WORK_API_KEY='your-api-key'
+go run ./cmd/beesuh \
+  -providers examples/providers-go.json -provider go-work \
+  -interactive -workspace personal -session chat-1
+```
+
+[단일 provider 예제](examples/providers-go.json)와
+[다중 provider 예제](examples/providers.json)를 바탕으로 사용 중인 모델에 맞춰 구성하세요.
+API key는 JSON에 넣지 않고 `api_key_env`로 환경 변수 이름을 참조합니다.
+registry에 등록한 모든 `api_key_env` 값이 필요하며, 예제의 모델 ID와
+`codex_home` 경로도 자신의 환경에 맞춰야 합니다.
+`-providers`와 `-model-url`·`-model` 플래그는 함께 사용할 수 없습니다.
+
+시작할 때는 선택하지 않은 provider도 모두 검증합니다. 다중 provider 예제의
+`codex-cli` 항목을 유지하면 기본 `strict` 토큰 정책으로는 시작할 수 없습니다.
+사용하지 않는 Codex 항목을 제거하거나 `-token-budget-policy advisory`를 지정하세요.
+`advisory`는 토큰 상한을 보장하지 않으며, `-provider go-work`를 선택해도 registry 전체
+검증을 건너뛰지 않습니다.
+
+| provider 종류 | 사용 방식 |
+| --- | --- |
+| `openai-compatible` | `base_url`과 모델을 지정합니다. 기본은 Chat Completions이며 `api`로 Responses 또는 Anthropic Messages를 선택할 수 있습니다. |
+| `opencode-go`, `opencode-zen` | 모델이 요구하는 프로토콜과 API key를 지정합니다. 별도의 OpenCode 서버는 필요하지 않습니다. |
+| `codex-api` | OpenAI API key로 공식 Responses API를 호출합니다. |
+| `codex-cli` | 설치한 Codex CLI와 로그인된 전용 `codex_home`을 사용합니다. |
+
+`-provider`를 생략하면 registry의 `default`를 사용합니다.
+HTTP 요청에서는 `"provider":"go-work"`처럼 선택할 수 있습니다.
+같은 session에서 provider를 바꾸면 새 provider에도 기존 대화 문맥이 전달됩니다.
+자동 failover나 부하 분산은 제공하지 않습니다. Gemini 프로토콜은 지원하지 않습니다.
+전체 필드와 프로토콜 제약은 [provider 설정](docs/providers.md)에 있습니다.
+
+### Codex CLI 사용하기
+
+로그인된 전용 Codex 프로파일의 **절대 경로**를 `codex_home`에 지정합니다.
+다음은 자신에게 맞게 바꿔 저장할 registry 구성 예시입니다.
+
+```json
+{
+  "default": "codex",
+  "providers": [
+    {
+      "id": "codex",
+      "kind": "codex-cli",
+      "model": "your-codex-model-id",
+      "command": "codex",
+      "codex_home": "/absolute/path/to/logged-in-codex-home"
+    }
+  ]
+}
+```
+
+`providers-codex.json`으로 저장했다면 다음과 같이 실행합니다.
+
+```sh
+go run ./cmd/beesuh \
+  -providers providers-codex.json -token-budget-policy advisory \
+  -interactive -workspace personal -session codex-chat
+```
+
+Codex CLI는 출력 토큰의 상한을 강제할 수 없어 기본 `strict` 정책으로는 시작하지
+않습니다. `advisory`는 토큰 한도를 힌트로 전달하며 비용 상한을 보장하지 않습니다.
+CLI의 내장 도구는 비활성화하고, Beesuh가 도구 호출을 검증·실행합니다.
+대화는 Rhiza에 보관하며 Codex CLI 세션을 resume하지 않습니다.
+
+사용자별 프로파일 격리와 실험적 `codex-app-server` 어댑터는
+[Codex 프로파일](docs/codex-profiles.md)에 설명되어 있습니다.
+실제 계정의 로그인·토큰 갱신 호환성은 별도 검증이 필요합니다.
+
+## 메모·스킬과 실행 옵션
+
+메모와 스킬은 기본적으로 꺼져 있습니다. 모델이 tool calling을 지원한다면
+대화 실행 명령에 `-memory` 또는 `-skills-dir /absolute/path/to/skills`를 추가하세요.
+
+- `-memory`: 대화별 메모를 최대 64개 저장합니다. 모델에는 사용자가 명시적으로 요청할 때만 저장하도록 지시합니다.
+- `-skills-dir`: 운영자가 설치한 일반 `name.md` 파일을 최대 32개, 파일당 8 KiB까지 읽습니다. 스킬 내용이 실행 권한을 부여하지는 않습니다.
+
+`memory_forget`은 활성 메모만 삭제합니다. 과거 대화 기록과 완료한 실행에는 내용이
+남을 수 있으므로 전체 데이터 삭제 기능으로 사용해서는 안 됩니다.
+
+| 옵션 | 기본값 | 용도 |
+| --- | --- | --- |
+| `-data-dir` | `.beesuh` | 로컬 데이터 디렉터리입니다. |
+| `-system` | 빈 값 | 추가 시스템 프롬프트를 지정합니다. |
+| `-timeout` | `5m` | 요청의 최대 실행 시간입니다. |
+| `-max-concurrent` / `-max-waiting` | `4` / `32` | 동시 실행 수와 대기 요청 수를 제한합니다. |
+| `-max-turns` | `12` | 요청당 모델·도구 반복 횟수를 제한합니다. |
+| `-max-context-bytes` | `65536` | 복원할 문맥의 크기를 제한합니다. |
+| `-max-output-tokens` | `2048` | 모델에 전달할 출력 토큰 한도입니다. |
+| `-token-budget-policy` | `strict` | 토큰 상한 정책입니다. `advisory`, `unlimited`도 선택할 수 있습니다. |
+
+전체 옵션은 `go run ./cmd/beesuh -h`로 확인할 수 있습니다.
+
+## 데이터와 현재 제한
+
+Rhiza가 실행 상태·대화 journal·선택적 메모를 로컬에 저장합니다.
+모델 API key와 credential 자체는 저장하지 않지만, **사용자 입력과 모델·도구 응답은
+기록에 포함됩니다.** 민감한 내용을 입력할 때는 모델 provider와 데이터 디렉터리의
+접근 권한·보관 정책을 함께 고려하세요.
+
+같은 session의 요청은 순서대로 실행됩니다. 문맥에는 최근 성공한 8개 turn 중 크기
+예산에 맞는 전체 turn만 포함하며 원본 journal은 자동 삭제하지 않습니다.
+입력은 12 KiB, 답변은 16 KiB까지이며, 큰 도구 결과는 원문 대신 생략 표시와 digest를 기록합니다.
+
+저장 한도에 도달하면 기존 기록을 지우는 대신 새 실행을 거절합니다.
+workspace별 기본 한도는 run 10,000개, session·connection 각각 1,000개이며 전체
+디렉터리 한도도 적용됩니다. HTTP에서는 `503 storage_capacity`를 반환합니다.
+백업과 디스크 관리는 운영자가 담당합니다.
+
+외부 효과를 다루는 어댑터에서 전송 결과를 확인하지 못하면 `uncertain` 상태로
+기록하고 해당 workspace의 새 외부 효과를 차단합니다. 자동 재시도하지 않습니다.
+`-recover`는 외부 효과를 되돌리는 명령이 아니므로, 서버를 멈추고 기존 기록과 외부
+작업 상태를 확인한 뒤 같은 데이터·도구 설정으로 실행해야 합니다.
+자세한 내용은 [실패 복구와 저장 정책](docs/uncertainty-and-retention-policy.md)을 참고하세요.
+
+SSE·스트리밍, 일반 MCP, 동적 도구, 자동 요약·벡터 메모리, 호출별 승인 기능은
+현재 제공하지 않습니다. 독립 실행에서 선택할 수 있는 도구는 메모와 정적 스킬 읽기입니다.
+기존 OpenCode 서버를 사용하는 `-backend opencode`도 남아 있지만 native 메모와
+journal 조회는 지원하지 않으며, 기존 session을 native로 자동 이관하지 않습니다.
+
+## 문서
+
+- [모델 provider 설정](docs/providers.md): registry 형식, 프로토콜, 계정 선택
+- [사용자별 연결 관리](docs/connections-design.md): 인증된 서비스에 런타임 내장
+- [Codex 프로파일](docs/codex-profiles.md): 계정 격리와 실험적 인증 어댑터
+- [API-key 전달 어댑터](docs/goauthy-api-key-delivery.md) · [OAuth 전달 어댑터](docs/goauthy-oauth-delivery.md): 외부 인증 서비스 연동 계약
+- [실패 복구와 저장 정책](docs/uncertainty-and-retention-policy.md): 불확실한 실행과 저장 한도
+- [통합 검증 범위](docs/local-integration-status.md): 독립 실행과 선택적 연동의 검증 한계
+
+외부 인증 어댑터는 기본 실행의 필수 구성 요소가 아닙니다.
+테스트 통과가 실제 provider 계정의 호출·로그인·갱신 검증을 뜻하지는 않습니다.
+
+## 개발과 기여
+
+버그 제보와 개선 제안은 [Issues](https://github.com/mrchypark/beesuh/issues),
+변경 제안은 Pull Request로 보내주세요. 재현 명령, 기대한 동작과 실제 동작을
+함께 적고, API key·토큰·개인 대화 내용은 제거해 주세요.
+
+소스 변경 후에는 다음 검사를 실행합니다. `GOWORK=off`는 로컬 workspace 대신
+`go.mod`에 고정한 의존성을 사용하도록 합니다.
+
+```sh
+GOWORK=off go test -race ./...
+GOWORK=off go vet ./...
+GOWORK=off go build ./cmd/beesuh
+```
+
+Go 코드는 `gofmt`로 정리합니다. OpenCode 플러그인 예제를 수정한다면 Bun이
+설치된 환경에서 `(cd examples/opencode && bun test)`도 실행하세요.
+CI는 Go 검사, 플러그인 검사, 컨테이너 빌드·실행 검사를 수행합니다.
+
+## 라이선스
+
+Beesuh는 [MIT 라이선스](LICENSE)로 배포됩니다.

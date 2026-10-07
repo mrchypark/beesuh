@@ -6,6 +6,11 @@ the highest-risk assumption that must be verified before shipping. It exists so
 the reasoning behind the runtime contracts is discoverable rather than
 re-derived.
 
+Standalone chat uses a model provider, local memory, and static skills. External
+effect adapters are retained implementation paths, not available services in the
+current environment. The legacy tool name below is kept only to explain recovery
+of existing records; it is not a setup or usage recommendation.
+
 ## 1. Uncertainty scope is the workspace
 
 An unresolved external effect blocks new external effects **in the affected
@@ -16,7 +21,7 @@ The pending row is committed **before** the external POST leaves the process
 (`clearUncertainIntent`). This closes the crash window that the earlier
 post-dispatch-only design left open. Committing intent before dispatch means a
 crash can conservatively fence an operation that never actually reached
-Conductor, which is the safe direction. A failed acknowledgement delete leaves
+the external service, which is the safe direction. A failed acknowledgement delete leaves
 the row pending rather than silently clearing evidence.
 
 An effect key that already exists refuses the dispatch. A reused key must not be
@@ -176,12 +181,12 @@ Inspection and uncertainty boundaries:
   unresolved-effects listing, independent of the latest-200 history view.
 - `ResolveUncertainEffect` is the only path that lifts a fence, and it is not
   reachable from any model-driven tool call.
-- Reconciliation cannot run while a dispatch is on the wire. `conductor_emit`
+- Reconciliation cannot run while a dispatch is on the wire. The external-effect adapter
   holds a shared fence lock from before the POST until the intent row is
   cleared or recorded, and resolution takes that lock exclusively. Without it
   an operator could mark an effect abandoned while its POST was still in
   flight; a second request would then pass the reservation and the first POST
-  would still reach Conductor, applying the operation twice. Displacement
+  would still reach the external service, applying the operation twice. Displacement
   between different effect keys stays concurrent; only the same fence row is
   serialized. This lock is in-process, so it carries the same one-Runtime-per-
   data-directory requirement as the session lifecycle lock.
@@ -284,24 +289,7 @@ prevents re-execution. The accepted cost is eventual admission refusal until
 the operator provisions a supported larger finite limit or exports the store
 for an explicit, separately reviewed maintenance operation.
 
-## 5. `/v1/compos` is a trusted-producer contract
-
-Permission to originate Compos executions is explicit, through a producer
-credential or permission. Accepted identifiers are bound to the authenticated
-producer and workspace, and authority is never derived from `subject_ref`.
-Under this contract those fields are producer assertions.
-
-If a downstream decision requires proof of an actual Conductor execution, that
-proof is a signed Conductor attestation, or a lookup binding execution ID,
-workspace, subject, and relevant payload. An existence-only lookup adds latency
-and an availability dependency without proving the necessary bindings.
-
-"Any authenticated caller" is not automatically a trusted producer, and
-documentation cannot turn a caller assertion into verified Conductor evidence.
-The accepted cost is that an authorized producer can assert false provenance
-within its permitted scope.
-
-## 6. Operator authentication stays bearer-based; cookie auth implies host CSRF
+## 5. Operator authentication stays bearer-based; cookie auth implies host CSRF
 
 Explicit `Authorization` bearer authentication remains the default. A host that
 introduces cookie authentication must enforce CSRF protection **before** calling
@@ -312,7 +300,7 @@ Rejecting requests that carry a `Cookie` header does not work: it cannot see
 authentication performed upstream, cannot stop a proxy from translating cookie
 auth into a bearer-authenticated request, and rejects unrelated cookies.
 
-## 7. Measure history scaling before optimizing anything else
+## 6. Measure history scaling before optimizing anything else
 
 Run a small benchmark against the real Rhiza history query: hold the returned
 latest 200 records constant while other retained workspace records grow to
@@ -339,20 +327,15 @@ throughout a deployment's lifetime.
 
 These obligations remain open in [deployment validation #19](https://github.com/mrchypark/beesuh/issues/19).
 
-- **Conductor scope enforcement.** Beesuh validates owned connections and sends
-  trusted scope headers; the gateway must enforce user, workspace, and
-  connection scope on both writes and reads.
-- **Idempotency durability.** Whether the real Conductor consumes the idempotency
-  key, and for how long, must be verified against the deployment.
 - **Pinned binaries.** Deployed Codex and OpenCode binary revisions must be
   pinned; local fixtures do not prove that boundary.
 - **GoAuthy token source binding.** The host must bind the token query to
   `(serviceUserID, connectionID, generation)`, not to whichever profile the UI
   currently has selected.
 
-## Highest-risk assumption to verify before shipping
+## Before adding external-effect execution
 
-That an uncertain Conductor effect can be reconciled or safely retried without
+Verify that an uncertain external effect can be reconciled or safely retried without
 repeating the downstream action. Force an effect to commit, lose its
 acknowledgement, restart Beesuh, then attempt concurrent recovery through a fresh
 session and a fresh connection. The downstream action must occur exactly once,

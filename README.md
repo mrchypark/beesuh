@@ -1,33 +1,46 @@
 # beesuh
 
 Beesuh는 Go 개인 비서 런타임이다. 기본 엔진은 OpenAI 호환 Chat Completions
-API를 직접 호출하므로 OpenCode나 Kronk 설치가 필요 없다. 사용자 대화와 Compos
-입력은 같은 `(workspace_id, session_key)` 대화로 들어오며, Conductor는 제한된
-agent tool이다.
+API를 직접 호출하므로 별도 에이전트 서버 설치가 필요 없다. 사용자 CLI와 HTTP
+입력은 같은 `(workspace_id, session_key)` 대화로 들어온다.
 
 ```text
-사용자 CLI / HTTP ─┐
-Compos 데이터 ────┼─ Beesuh ─ OpenAI 호환 모델 API
-                  │     ├─ Rhiza: 실행, journal, 선택 memory
-                  │     └─ Conductor: allowlist tool
+사용자 CLI / HTTP ─ Beesuh ─ 모델 provider
+                     ├─ Rhiza: 실행, journal, 선택 memory
+                     └─ 선택 도구: memory, 정적 skill 읽기
 ```
 
 현재 범위는 임베딩 가능한 런타임과 운영자용 CLI/HTTP다. 사용자 로그인 서버,
-실제 OAuth/Codex 계정 연동 및 Compos 전체 워크플로의 완료를 의미하지 않는다.
+실제 OAuth/Codex 계정 연동의 완료를 의미하지 않는다.
 [통합 범위와 검증 한계](docs/local-integration-status.md)를 참고한다.
 
 ## Docker 이미지
+
+`main`의 CI가 Go·race·Bun·컨테이너 검사를 모두 통과하면
+`ghcr.io/mrchypark/beesuh` 이미지를 GitHub Container Registry에 빌드·푸시한다.
+`ci` 워크플로를 `main`에서 수동 실행해도
+같은 검사를 거쳐 게시한다. PR에서는 이미지를 빌드하고 실행만 검증한다.
+게시 태그는 `latest`와 전체 커밋 SHA다. 게시에는 `packages: write` 권한을 가진
+워크플로의 `GITHUB_TOKEN`을 사용한다.
 
 이미지는 Linux amd64, UID/GID `10001`로 실행한다. `/data`에는 Rhiza 실행·대화
 데이터가 저장되므로 영속 볼륨을 연결한다. 같은 데이터 디렉터리는 하나의 Beesuh
 인스턴스만 사용한다. 호스트 디렉터리를 연결할 때는 UID `10001`의 쓰기 권한이 필요하다.
 
 ```sh
-# BEESUH_IMAGE에는 CI가 게시한 이미지 경로와 태그를 넣는다.
+BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:latest
+docker pull "$BEESUH_IMAGE"
 docker run --rm -p 127.0.0.1:8080:8080 \
   -v beesuh-data:/data \
   -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
   "$BEESUH_IMAGE"
+```
+
+로컬에서 이미지를 빌드하려면 다음 명령을 사용한다.
+
+```sh
+docker build --platform linux/amd64 -t beesuh:local .
+BEESUH_IMAGE=beesuh:local
 ```
 
 다중 provider registry는 읽기 전용으로 연결하고 기본 실행 인자를 함께 지정한다.
@@ -123,24 +136,6 @@ session을 선택할 수 있다. 다중 사용자 서비스는 이 handler 대�
 `Principal`을 받는 `httpapi.NewAuthenticated`를 사용한다. service mode에서는
 `connection_id`가 필수이며, 대화·run·history·memory는 사용자와 workspace로 분리된다.
 
-### Compos trigger
-
-Compos는 하나의 입력 trigger다. 기존 agent outbox의 **data object**
-(`agent_definition`, `task_definition`, `input`, `subject_ref`, `_compos`)를
-넣는다.
-
-```sh
-go run ./cmd/beesuh \
-  -model-url "$BEESUH_MODEL_URL" -model "$BEESUH_MODEL" \
-  -compos -session work-1 < examples/compos-input.json
-```
-
-HTTP에서는 `POST /v1/compos?session_key=work-1&provider=go-work`로 같은 JSON body를 보낸다.
-provider query는 registry를 쓸 때만 필요하며 생략하면 default를 쓴다.
-Adapter는 Compos input/output schema를 검증하고 workspace와 실행 request identity를
-보존한다. Compos callback, 자동 결과 전달, push/pull은 아직 합의되지 않은 계약이라
-구현하지 않았다.
-
 ### 조회 API
 
 모두 bearer token이 필요하다.
@@ -177,26 +172,7 @@ API key 입력은 기존 resolver 호환용으로만 지원한다.
 정적으로 읽는다. 모델은 `load_skill`로 내용을 읽을 수 있지만 skill은 권한을
 부여하지 않는다.
 
-Conductor는 명시적으로 켠다.
-
-```sh
-export CONDUCTOR_URL='http://127.0.0.1:3000'
-export CONDUCTOR_ALLOWED_EVENTS='echo'
-export CONDUCTOR_EVENT_BINDINGS='{"echo":{"handler_key":"payload.echo","handler_version":"1","operation_key":"payload.echo"}}'
-# deployment gateway가 요구할 때만 CONDUCTOR_TOKEN을 설정한다.
-go run ./cmd/beesuh \
-  -model-url "$BEESUH_MODEL_URL" -model "$BEESUH_MODEL" \
-  -conductor-tools -workspace personal -session chat-1 -request-id workflow-1 \
-  -message 'echo handler를 실행해 줘.'
-```
-
-허용 도구는 `conductor_emit`과 `conductor_get_run`뿐이다. event allowlist는
-operator가 `CONDUCTOR_ALLOWED_EVENTS`로 주고, 각 이름의 등록 handler/version/operation을
-`CONDUCTOR_EVENT_BINDINGS`로 명시한다. Conductor는 개별 handler execution을 큐에 넣으며
-workflow 전체를 실행하지 않는다. 응답의 `execution_id`를 보존하여 `conductor_get_run`의
-`run_id`로 조회한다(실제 endpoint는 `/v1/executions/{id}`). `_compos` linkage는 runtime이
-생성하고 모델이 준 `_compos`/`subject_ref`는 거절한다. 실행 완료에는 Conductor worker가 필요하다. 현재 native backend에는 tool별
-매 호출 승인 화면이 없으므로 신뢰된 사용자·서비스 경로에서만 켜야 한다.
+독립 실행에서는 위 도구만 선택적으로 사용한다. 외부 작업 실행 서비스는 제공하지 않는다.
 
 ## 저장, 제한, 실패
 
@@ -211,7 +187,7 @@ native 입력은 12 KiB, JSON 인코딩된 user message는 24 KiB까지다. 답�
 `output_omitted`와 digest를 기록한다. context에는 최근 성공한 8개 turn 중
 예산에 맞는 전체 turn만 넣으며, 저장된 원본 journal은 삭제하지 않는다.
 
-Conductor event처럼 외부 효과가 가능한 tool은 intent를 먼저 기록한다. 전송 확인을
+외부 효과를 다루는 기존 adapter 경로는 intent를 먼저 기록한다. 전송 확인을
 못 하면 `uncertain`으로 끝내고 자동 재시도·자동 side-effect replay를 하지 않는다.
 이 경우 해당 workspace의 새 외부 효과는 durable 기록이 남아 있는 동안 차단된다.
 재시작·새 session·새 connection으로 우회할 수 없다. 조회와 명시적 복구는 계속 가능하다.
@@ -219,7 +195,7 @@ Conductor event처럼 외부 효과가 가능한 tool은 intent를 먼저 기록
 `uncertain`으로 차단한다. abort 성공은 이미 실행된 외부 효과가 없다는 증거가 아니다.
 `-recover`는 미완료 실행을 `interrupted`로 기록하며 외부 효과를 되돌리지 않는다.
 서버를 멈추고 같은 data directory와 도구/스킬 설정으로 실행한다. 먼저 journal과
-Conductor 상태를 확인해야 하며, 복구 이후 새 request ID로 같은 작업을 보내면
+외부 작업 상태를 확인해야 하며, 복구 이후 새 request ID로 같은 작업을 보내면
 외부 작업이 중복될 수 있다. 기존 OpenCode session을 native로 자동 이관하지 않는다.
 
 SSE/streaming, 일반 MCP, 동적 tool, 자동 요약/vector memory, per-call approval, UI,
@@ -231,14 +207,6 @@ SSE/streaming, 일반 MCP, 동적 tool, 자동 요약/vector memory, per-call ap
 기존 OpenCode session wrapper는 `-backend opencode`로 선택할 수 있다. 이 경로에는
 OpenCode server와 해당 server의 model 설정이 필요하며 native memory/journal history는
 제공하지 않는다. 새 배포는 native backend를 사용한다.
-`examples/opencode/tools/conductor.ts`는 operator 전용 예제이며, Conductor URL·allowlist·
-handler bindings와 `CONDUCTOR_WORKSPACE_ID`를 OpenCode server 환경에 명시해야 한다.
-이 예제를 사용자별 gateway나 인증 위임으로 사용하면 안 된다.
-
-레거시 `conductor_emit`은 모든 호출을 거절한다. 이전 대화에 저장된 tool 이름으로
-호출해도 Conductor에 요청을 보내지 않는다. 환경변수로 이 제한을 해제할 수 없다.
-외부 작업 전송에는 durable intent와 불확실성 기록을 관리하는 native tool boundary를
-사용한다. 레거시 `-conductor-tools`는 실행 상태 조회만 허용한다.
 
 ## 검증
 
@@ -255,8 +223,8 @@ go build ./cmd/beesuh
 ```
 
 
-현재 GoAuthy 공통 credential-profile 확장 연동 목표, Conductor 실측 결과와 Compos의
-미지원 계약은 [로컬 통합 상태](docs/local-integration-status.md)에 구분해 기록했다.
+현재 독립 실행 범위와 선택적 인증 adapter의 검증 한계는
+[로컬 통합 상태](docs/local-integration-status.md)에 구분해 기록했다.
 
 GoAuthy에서 연결한 여러 Codex 계정을 선택해 사용하는 consumer 격리와 실험적 app-server
 인증은 [Codex 프로파일](docs/codex-profiles.md)에 설명했다.

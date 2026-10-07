@@ -64,8 +64,8 @@ err := runtime.RegisterConnection(ctx, beesuh.Connection{
 	ID: "conn_user_42_go_work",
 	UserID: "user_42",
 	WorkspaceID: "workspace_acme",
-	Kind: "provider", // provider 또는 conductor
-	TargetID: "go-work", // NativeOptions.Providers 또는 NativeOptions.Conductors alias
+	Kind: "provider",
+	TargetID: "go-work", // NativeOptions.Providers alias
 	CredentialRef: "secretref:user_42:opencode_go_work",
 	State: "ready", // ready, needs_login, revoked
 })
@@ -81,8 +81,7 @@ provision해야 한다. `needs_login`에서 `ready` 전환은 실제 인증을 �
 거절하며 fresh provisioning이 필요하다.
 
 요청은 provider connection을 반드시 지정한다. `provider`를 함께 보내는 경우에는 그
-alias가 connection의 target과 같아야 한다. `conductor_connection_id`는 선택이며,
-Conductor tool을 쓸 때만 provider connection과 별도로 지정한다.
+alias가 connection의 target과 같아야 한다.
 
 ```http
 POST /v1/chat
@@ -93,8 +92,7 @@ Content-Type: application/json
   "session_key": "support-12",
   "request_id": "msg-018",
   "connection_id": "conn_user_42_go_work",
-  "conductor_connection_id": "conn_user_42_workflow",
-  "message": "배포 상태를 확인해 줘"
+  "message": "오늘 할 일을 정리해 줘"
 }
 ```
 
@@ -108,13 +106,12 @@ workspace가 authenticated principal과 다르거나, 다른 사용자의 connec
 `connection_id`는 호출자의 것이다. endpoint, environment-variable name, key,
 CodexHome은 반환하지 않는다.
 
-Compos는 existing connector binding의 `connection_id`를 유지한다. service adapter는
-authenticated principal의 workspace와 그 ID를 Beesuh request에 붙여야 하며, Compos
-payload가 owner나 workspace를 결정하게 하면 안 된다.
+service adapter는 authenticated principal의 workspace와 등록된 `connection_id`를
+Beesuh request에 붙여야 한다. 입력 payload가 owner를 결정하게 하면 안 된다.
 
 ## Connector와 provider의 credential 책임
 
-`ResolveCredential(ctx, connection)`은 매 model/Conductor 외부 호출 직전에 owner가 확인된
+`ResolveCredential(ctx, connection)`은 매 model 외부 호출 직전에 owner가 확인된
 ready connection으로 호출된다. callback은 `Credential{HTTPClient, AccountID}` 또는 CLI용
 `Credential{CodexHome, AccountID}`를 반환한다. HTTP client는 이미 connection 범위로
 인증되어 있으며, transport가 OAuth refresh와 새 token 저장을 소유한다. resolver는
@@ -122,7 +119,7 @@ connection별 call lock 안에서 호출된다. callback 안에서 같은 connec
 `SetConnectionState`를 호출하면 lock을 재진입하므로 호출하지 않는다.
 
 `Credential.APIKey`는 기존 service resolver 호환용 입력이다. 런타임이 request 직전에
-`auth.HeaderClient`로 인증 HTTP client로 바꾸고 원본 key를 model/Conductor 설정에 남기지
+`auth.HeaderClient`로 인증 HTTP client로 바꾸고 원본 key를 model 설정에 남기지
 않는다. 새 service 구현은 raw key를 넘기기보다 secret store가 만든 `HTTPClient`를 넘긴다.
 `CodexHome`은 Codex CLI 연결에서만 가능하며 HTTP client/API key와 함께 줄 수 없다.
 Rhiza에는 raw key, access token, refresh token, API key hash를 저장하지 않으며, secret
@@ -168,41 +165,8 @@ Codex CLI는 resolver가 account-specific explicit `CodexHome`을 제공해야 �
 owner다. Beesuh는 inherited user auth나 auth JSON을 읽거나 복사하지 않는다. 실제 OAuth
 connector는 해당 connector adapter가 refresh owner다.
 
-service mode의 Conductor는 named connection과 `RequireScope: true`인 gateway access
-credential을 필수로 요구한다. 이는 Slack/Google 등의 external connector OAuth token이
-아니며, 실제 external grant는 service/gateway adapter가 connection ID로 해석한다.
-Beesuh는 trusted principal에서만 다음 scope headers를 전송한다.
-
-- `X-Beesuh-User-ID`
-- `X-Beesuh-Workspace-ID`
-- `X-Beesuh-Connection-ID`
-
-Conductor gateway는 service bearer를 검증하고 event emit과 run lookup 모두에서 이 scope를
-권한 검사해야 한다. gateway가 작업을 큐에 넣으면 실제 실행 시점에도 사용자와 연결 상태를
-다시 조회해야 한다. 이 헤더 자체는 권한을 부여하지 않는다. state revoke는 admitted call이
-끝날 때까지 기다리고, 이후 새 외부 호출을 막는다. 이미 gateway가 수락한 외부 효과는
-되돌릴 수 없다. Conductor/Compos의 gateway scope contract는 이 repository 밖의 명시적인
-배포 계약이며, 여기서 그 서버 구현을 변경하지는 않는다.
-
 ## 참고한 커넥터 설계
 
 [Amp Labs connectors 적용 기준](amp-connectors-adoption.md)에 공급자 카탈로그, 인증된
 클라이언트 주입, OAuth 갱신 저장, capability 경계를 정리했다. 현재 구현과 후속 OAuth
-연동에서 추가할 부분을 구분하며, Conductor gateway 인증과 외부 SaaS 계정 인증도 분리한다.
-
-
-### Conductor execution wire contract (2026-09-07)
-
-`AllowedEvents`의 각 이름은 operator가 `Bindings`의 `HandlerKey`, `HandlerVersion`,
-`OperationKey`에 명시적으로 연결한다. 일반 workflow 이름을 handler 이름으로 추측하지 않는다.
-Native runtime은 요청의 workspace(서비스 모드에서는 인증된 Principal의 원래 workspace)와
-안정적인 effect key를 `_compos.workspace_id` / `execution_request_id`로 주입한다.
-`actor: {type: service, id: beesuh}`는 감사 메타데이터이며 위임 권한이 아니다.
-모델 데이터의 `_compos`와 `subject_ref`는 거절한다. 응답 `execution_id`는 그대로 보존하며
-`GetExecution` 및 기존 `GetRun`은 `/v1/executions/{id}`를 읽는다.
-
-현재 Conductor 서버의 전역 service-token gate는 사용자별 실행/조회 권한을 검사하지 않는다.
-따라서 그 서버를 `RequireScope: true` gateway라고 설정하면 안 된다. 이 옵션은 별도로
-구현·검증된 gateway의 계약을 선언할 뿐 서버 권한 기능을 만들어 주지 않는다.
-현재 직접 연동 범위는 신뢰된 operator의 non-SaaS handler fixture다. 사용자별 SaaS 실행,
-취소, cross-client delegation, Compos callback은 이 adapter가 구현하지 않는다.
+연동에서 추가할 부분을 구분한다. 독립 실행의 연결 예제는 모델 provider를 대상으로 한다.

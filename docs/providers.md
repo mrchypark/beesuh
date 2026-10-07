@@ -65,9 +65,8 @@ go run ./cmd/beesuh -providers examples/providers.json -provider go-work \
   -message '오늘 일을 정리해 줘.'
 ~~~
 
--provider를 생략하면 registry default가 모든 omitted request에 쓰인다. CLI Compos
-입력도 -provider 값으로 선택한다. HTTP direct chat JSON에는 optional provider field를
-넣고, HTTP Compos에는 ?provider=go-work query parameter를 쓴다.
+-provider를 생략하면 registry default가 쓰인다. HTTP direct chat JSON에는
+optional provider field를 넣는다.
 
 ~~~json
 {

@@ -11,7 +11,7 @@ run. The required resource is `https://beesuh.local.test`; required access-token
 scope is `openid`. Beesuh introspects every request, requires active token,
 exact resource audience, `openid`, valid `exp`/`nbf`, and matching UserInfo
 subject. Its user ID is a stable hash of `beesuh:oidc-user:v1`, issuer, and
-subject; it is deliberately unrelated to the Compos principal ID.
+subject; a caller-supplied identity is not used as the principal ID.
 
 The service supplies fixed membership fixtures—there is no auto-enrollment:
 
@@ -62,7 +62,7 @@ extension and authorized token delivery.
 
 ### Final common fixture candidate
 
-After separating Compos's required API scope from Beesuh's required `openid`,
+After confirming Beesuh's required `openid` scope,
 the issuer owner reran the final fixture candidate. The log
 `/tmp/goauthy-beesuh-identity-live-final-20260907.log` confirms fixture PASS
 (1.25s) and Beesuh consumer PASS (0.71s, package 1.307s); EXPIRED remained SKIP.

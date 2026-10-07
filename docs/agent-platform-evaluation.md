@@ -13,8 +13,8 @@ Pro의 최종 권고도 C(기존 runtime 유지 + 선택적 차용)다. 별도 G
 전체 control plane 도입을 분리하라는 의견을 반영했다. Pro가 지적한 기본 Env 맵의
 얕은 복사·공유 변경은 고정 SHA의 `runner.go:202–230`을 다시 읽어 확인했다.
 
-추가 핵심 의견: Conductor를 도구로 추가하는 것만으로 효과 권한이 독점되지 않는다.
-외부 harness의 내장 bash/네트워크 도구가 Conductor를 우회할 수 없어야 한다.
+추가 핵심 의견: 외부 효과 도구를 추가하는 것만으로 효과 권한이 독점되지 않는다.
+외부 harness의 내장 bash/네트워크 도구가 Beesuh의 도구 경계를 우회할 수 없어야 한다.
 프로세스 취소는 이미 발생한 원격 효과의 취소 증거가 아니고, process-local lock은
 분산 중복 실행 방지의 증거가 아니다. 권고는 소스 분석이며 통합 테스트 통과 주장이 아니다.
 
@@ -52,7 +52,7 @@ Provider.Execute 직접 호출은 Runner 재시도를 건너뛸 수 있지만 pr
 ## 유지할 책임과 제거 가능한 코드
 
 GoAuthy는 사용자·외부 계정·동의·credential 권한 원본, Beesuh는 대화·Connection 선택과
-실행 승인, Conductor는 외부 도구 효과, Compos는 입력 trigger다. 재시도 권한과 작업의
+실행 승인을 담당한다. 독립 실행의 입력은 CLI/HTTP이며, 외부 작업 실행 서비스는 없다. 재시도 권한과 작업의
 최종 상태를 두 런타임이 동시에 소유하지 않아야 한다.
 
 어댑터가 동등한 계약을 통과하면 기존 CLI 실행/종료·stdout 해석 코드 일부를 대체할 수 있다.
@@ -78,7 +78,7 @@ provider별 capability/readiness 구분, provider session과 서비스 session�
 
 1. 같은 provider의 두 계정을 동시에 실행해 HOME/env/token/session 교차 사용 0회.
 2. timeout/reset/잘못된 schema 뒤 실제 실행 횟수 1회; 효과 발생 뒤 응답 유실은 uncertain.
-   내장 도구의 Conductor 우회를 막고, 새 tool-call ID를 생성해도 같은 효과를 재실행하지 않음.
+   내장 도구의 Beesuh 도구 경계 우회를 막고, 새 tool-call ID를 생성해도 같은 효과를 재실행하지 않음.
 3. 취소 시 자식 process group 종료, 최종 이벤트 한 번, 후속 도구 실행 없음.
 4. 같은 계정의 session resume 성공과 계정 변경 시 이전 session 재사용 거절.
 5. 중간 이벤트·usage·오류가 공통 계약으로 전달되며 비밀은 로그/journal에 없음.

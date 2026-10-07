@@ -1,5 +1,8 @@
 # Registered issue closure record
 
+This is a historical regression record. Compos and Conductor names below identify
+retained adapters and fixtures, not available services or standalone setup steps.
+
 This record prepares closure evidence for issues #2 through #14. It records the
 original defect, the implemented boundary, and the named regression evidence.
 `Fixed` records implemented boundaries and named local regression evidence. Merge

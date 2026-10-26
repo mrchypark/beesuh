@@ -1,0 +1,32 @@
+FIXTURE beesuh-live-0YDfbQB7L6
+IMAGE sha256:e0ca26a0f916fefb57a83324d9d080d450cc9e17dae822549e7b5cf9116101b6
+SOURCE beesuh HEAD=f8a44022244fc5c6ac0a200315e5da906f41d8f7 dirty=true working-tree-sha256=f048fbc17b676a03f6e8fc45dff3d4297ed423cdffc2d4d69e72ed06d366e631
+SOURCE goauthy HEAD=ee8e2f920fafa8e09111d4b3f0ba999a759d0d6c dirty=true working-tree-sha256=b95f3d7665d576907b35a3620ace20391e4957bf266b42bcdc1b3bbbe03db5cf
+STEP build actual Goauthy standalone binary
+GOAUTHY-BINARY sha256=0633ca0e731c6e9e23a64a1b4b48b990abc89686c1fd7947bbe61a70f2f9c98d
+NETWORK 8bfe78bfb7c0da2eb8d85a523215ecfa0a0d289a796d0c7afc04f952d06e628f
+CONTAINER auth ee8095ec7adb80ce95fc6c978b2f82c7225ff12da72956d50261658e6a26c634
+PASS real Goauthy HTTPS startup
+PASS real password login and browser session
+PASS confidential managed consumer authorization code + S256 PKCE
+CONTAINER bee 88d53cc32cbc11161aba572bee2d81e5bb3585ceb007fb546701efdad3d3fdd3
+BEE-PORT phase=start old= new=http://127.0.0.1:32776
+PASS Docker Beesuh lists actual Goauthy connection without model dispatch
+COUNTERS credential=0 model=0 token=1 introspection=4 userinfo=2
+COUNTERS credential=0 model=0 token=1 introspection=6 userinfo=3
+PASS unapproved binding rejected without credential retrieval
+PASS real Goauthy handoff page and CSRF approval + callback state
+PASS Docker Beesuh verifies and selects approved binding
+COUNTERS credential=0 model=0 token=1 introspection=11 userinfo=6
+PASS Docker model execution using real Goauthy vault delivery
+COUNTERS credential=1 model=1 token=1 introspection=23 userinfo=16
+BEE-PORT phase=restart old=http://127.0.0.1:32776 new=http://127.0.0.1:32777
+PASS confidential managed consumer authorization code + S256 PKCE
+COUNTERS credential=1 model=1 token=2 introspection=25 userinfo=18
+COUNTERS credential=2 model=2 token=2 introspection=37 userinfo=28
+PASS Beesuh container restart preserves selected references and executes with fresh human token
+PASS actual consent revocation prevents subsequent model dispatch
+COUNTERS credential=2 model=2 token=2 introspection=46 userinfo=36
+PASS no model key or user token in container logs or Beesuh environment/config/persisted data
+PASS owned container IDs, run inventories, network and temp cleanup verified
+PASS full isolated actual Goauthy + Beesuh Docker integration and verified cleanup

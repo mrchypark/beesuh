@@ -1,0 +1,61 @@
+Actual Goauthy + Beesuh Docker integration: PASS (exit 0)
+2026-10-26, latest successful run beesuh-live-1jKrAROJk4.
+
+Scope and provenance
+Real Goauthy built from local /Users/cypark/Documents/project/goauthy working tree,
+then run as a Linux process in an isolated Docker container. The fixture proxy forwards
+actual authority routes unchanged. Only the model is synthetic. TLS verifies the fixture CA
+and service hostname. No production provider/service, TLS bypass, or image push was used.
+
+Beesuh was built using the unchanged repository Dockerfile.
+Retained reproducible image tag: beesuh-container-live:20261026-0550
+Immutable image ID: sha256:e0ca26a0f916fefb57a83324d9d080d450cc9e17dae822549e7b5cf9116101b6
+Goauthy binary SHA256: 0633ca0e731c6e9e23a64a1b4b48b990abc89686c1fd7947bbe61a70f2f9c98d
+Runtime: Docker Engine 29.6.1 linux/arm64, explicit dory context.
+
+Source evidence captured by latest run (dirty working trees):
+Beesuh HEAD: f8a44022244fc5c6ac0a200315e5da906f41d8f7
+Beesuh working-tree SHA256: 3338566913dbe4103622b26b943bd59688e0ba0d0175c6e0aff9ddb66bc0504a
+Goauthy HEAD: ee8e2f920fafa8e09111d4b3f0ba999a759d0d6c
+Goauthy working-tree SHA256: b95f3d7665d576907b35a3620ace20391e4957bf266b42bcdc1b3bbbe03db5cf
+The image predates final fixture-only edits. These are run-time source fingerprints,
+not a claim of a pristine committed source checkout or build-time source attestation.
+
+Passed checks
+- Exact image CLI/Rhiza startup, authenticated status and unauthenticated rejection.
+- Real Goauthy HTTPS startup, password/browser login, code + S256 PKCE.
+- List real connections; reject unapproved binding without credential/model dispatch.
+- Real CSRF-protected handoff approval, callback state, and approved binding selection.
+- First chat uses actual Goauthy vault credential delivery and synthetic model.
+- Beesuh restart preserves selected reference; second chat uses a fresh human token.
+- Actual Goauthy consent revocation prevents further credential/model dispatch.
+- No model key or user token in container logs or Beesuh environment/config/persisted data.
+Counters: before approval 0 credential/0 model; first execution 1/1;
+second execution 2/2; after revocation still 2/2.
+Final actual authority route counts: credential=2 token=2 introspection=46 userinfo=36.
+
+Image identity and restart proof
+Independent same-image check: Config.User=beesuh; actual UID/GID=10001.
+Previous full pass live observer independently captured Bee Config.Image and .Image matching
+immutable ID, Config.User=beesuh, PID 17424 -> 17675, port 32776 -> 32777.
+Latest confirmation run logged port 32779 -> 32780; refreshing published endpoint fixed restart.
+See image-identity.log and e2e-restart-live-state.log.
+
+Independent cleanup
+Latest auth ID: fd245ebb89088ed9d27d78c6066730b422797b5fd2207f4e1d4b31134d7be0bd
+Latest Bee ID: b086170504c7ced5920bd09d847b6b3d7afb55cedf4d0e9d77059b78b8822a3d
+Latest network ID: 338a07cf3cb34771facb998aac5097681492ad903e367e4c87ed928c8a1b9614
+Successful complete inventories plus separate run-label-filtered queries confirm all absent.
+No owned harness/observer command remains. No owned test container/network remains.
+Requested immutable image is retained for reproduction, without push. Shared Dory resources
+and daemon management were untouched. No remaining runtime resource is unverifiable.
+
+Evidence
+Latest authoritative successful run: e2e-port-refresh.log (harness process exit 0).
+Independent cleanup: e2e-port-refresh-cleanup.log.
+e2e-final.log / e2e-final-cleanup.log duplicate the latest successful proof.
+Previous full pass: e2e-container-model-restart.log; live state: e2e-restart-live-state.log.
+Build: docker-build.log; smoke: docker-smoke.log.
+All earlier failure/diagnostic logs are HISTORICAL and SUPERSEDED by these full passes.
+They document registry/daemon instability and fixture-only redirect, TLS/probe and stale-port
+issues. They do not invalidate the final run. No core Beesuh edits were made by runtime worker.

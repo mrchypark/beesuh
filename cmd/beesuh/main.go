@@ -73,10 +73,18 @@ func run() error {
 		maxOutput           = flag.Int("max-output-tokens", 2048, "native maximum completion tokens")
 		tokenBudget         = flag.String("token-budget-policy", string(beesuh.TokenBudgetStrict), "native token budget policy: strict, advisory, or unlimited")
 		interactive         = flag.Bool("interactive", false, "read direct chat messages, one line at a time")
-		listen              = flag.String("listen", "", "serve direct chat HTTP, e.g. 127.0.0.1:8080; requires BEESUH_API_TOKEN")
+		listen              = flag.String("listen", "", "serve direct chat HTTP; requires -service-config or -operator-http")
+		serviceFile         = flag.String("service-config", "", "OAuth2/OIDC service configuration file")
+		operatorHTTP        = flag.Bool("operator-http", false, "explicitly enable shared-credential operator HTTP mode")
 		writeTimeout        = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
 	)
 	flag.Parse()
+	if *listen != "" && ((*serviceFile == "" && !*operatorHTTP) || (*serviceFile != "" && *operatorHTTP)) {
+		return errors.New("HTTP requires exactly one of -service-config or -operator-http")
+	}
+	if *serviceFile != "" && (*listen == "" || *backend != "native" || *providersFile == "") {
+		return errors.New("-service-config requires -listen, -backend native and -providers")
+	}
 	if !filepath.IsAbs(*directory) {
 		return errors.New("-directory must be absolute")
 	}
@@ -104,7 +112,11 @@ func run() error {
 			if explicitFlag("model") || explicitFlag("model-url") {
 				return errors.New("-providers cannot be combined with -model or -model-url")
 			}
-			providers, defaultProvider, err := model.LoadProviders(*providersFile)
+			loadProviders := model.LoadProviders
+			if *serviceFile != "" {
+				loadProviders = model.LoadServiceProviders
+			}
+			providers, defaultProvider, err := loadProviders(*providersFile)
 			if err != nil {
 				return err
 			}
@@ -163,13 +175,36 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var service *serviceConfig
+	if *serviceFile != "" {
+		service, err = loadService(*serviceFile)
+		if err != nil {
+			return err
+		}
+		if err = service.configure(&options); err != nil {
+			return err
+		}
+	}
 	runtime, err := beesuh.Open(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer runtime.Close()
 	if *listen != "" {
-		handler, err := httpapi.New(runtime, os.Getenv("BEESUH_API_TOKEN"))
+		var handler http.Handler
+		if service != nil {
+			for _, c := range service.Connections {
+				if err := runtime.RegisterConnection(ctx, c.connection(service.Issuer)); err != nil {
+					return err
+				}
+			}
+			handler, err = httpapi.NewAuthenticated(runtime, service.authenticate)
+			if err == nil && service.Goauthy != nil {
+				handler = service.discoveryHandler(runtime, handler)
+			}
+		} else {
+			handler, err = httpapi.New(runtime, os.Getenv("BEESUH_API_TOKEN"))
+		}
 		if err != nil {
 			return err
 		}

@@ -1,0 +1,15 @@
+FIXTURE beesuh-live-tzsBOy_phT
+IMAGE sha256:e0ca26a0f916fefb57a83324d9d080d450cc9e17dae822549e7b5cf9116101b6
+SOURCE beesuh HEAD=f8a44022244fc5c6ac0a200315e5da906f41d8f7 dirty=true working-tree-sha256=58f0555a78eca25d3846d05ff154baa00523a42dd09ccd9f31d3e52c025914c6
+SOURCE goauthy HEAD=ee8e2f920fafa8e09111d4b3f0ba999a759d0d6c dirty=true working-tree-sha256=b95f3d7665d576907b35a3620ace20391e4957bf266b42bcdc1b3bbbe03db5cf
+STEP build actual Goauthy standalone binary
+GOAUTHY-BINARY sha256=0633ca0e731c6e9e23a64a1b4b48b990abc89686c1fd7947bbe61a70f2f9c98d
+NETWORK 02c60ec3d3764292e0d68a71858ed86a3517d2fd6aef3066e57cc06ff8b9bc9c
+CONTAINER auth b5e4a275f6dfae2a16434b233bc9fab251e2732be9e97b3e20a3f58264fbf997
+PASS real Goauthy HTTPS startup
+PASS real password login and browser session
+PASS confidential managed consumer authorization code + S256 PKCE
+CONTAINER bee 7ac78b63575afcd48d7ab3cfe5c0a83340d4cf599be6c94c6422412da2f51b82
+Sanitized failure evidence: /var/folders/r4/bygqtzg554v3dh6zd8z41zgw0000gn/T/beesuh-goauthy-live-3502420757.failure.log
+PASS owned container IDs, run inventories, network and temp cleanup verified
+FAIL: model TLS reachability preflight: docker failed: exit status 1: TLS probe failed: fixture HTTPS connection or certificate validation failed

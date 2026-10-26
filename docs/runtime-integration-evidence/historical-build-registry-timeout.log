@@ -1,0 +1,18 @@
+#0 building with "dory" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 847B done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 ERROR: failed to do request: Head "https://registry-1.docker.io/v2/docker/dockerfile/manifests/1": dial tcp 100.49.148.156:443: i/o timeout
+------
+ > resolve image config for docker-image://docker.io/docker/dockerfile:1:
+------
+Dockerfile:1
+--------------------
+   1 | >>> # syntax=docker/dockerfile:1
+   2 |
+   3 |     FROM --platform=$BUILDPLATFORM golang:1.27.0 AS build
+--------------------
+ERROR: failed to build: failed to solve: DeadlineExceeded: failed to resolve source metadata for docker.io/docker/dockerfile:1: failed to do request: Head "https://registry-1.docker.io/v2/docker/dockerfile/manifests/1": dial tcp 100.49.148.156:443: i/o timeout

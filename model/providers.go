@@ -17,7 +17,14 @@ func ValidProviderID(id string) bool { return providerID.MatchString(id) }
 
 // LoadProviders reads named connections. Secrets are environment references,
 // never literal config fields. Repeated kinds are allowed; IDs must be unique.
-func LoadProviders(path string) (map[string]Config, string, error) {
+func LoadProviders(path string) (map[string]Config, string, error) { return loadProviders(path, false) }
+
+// LoadServiceProviders rejects shared credentials before reading environment values.
+func LoadServiceProviders(path string) (map[string]Config, string, error) {
+	return loadProviders(path, true)
+}
+
+func loadProviders(path string, service bool) (map[string]Config, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, "", err
@@ -58,6 +65,9 @@ func LoadProviders(path string) (map[string]Config, string, error) {
 			return nil, "", fmt.Errorf("model: duplicate provider ID %q", entry.ID)
 		}
 		cfg := entry.Config
+		if service && cfg.APIKeyEnv != "" {
+			return nil, "", errors.New("model: service providers forbid credential environment references")
+		}
 		if cfg.APIKeyEnv != "" {
 			if !envName.MatchString(cfg.APIKeyEnv) {
 				return nil, "", errors.New("model: invalid credential environment reference")

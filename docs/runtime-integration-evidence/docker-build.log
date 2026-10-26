@@ -1,0 +1,83 @@
+#0 building with "dory" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 847B 0.0s done
+#1 DONE 0.1s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.9s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/alpine:3.22
+#4 DONE 0.8s
+
+#5 [internal] load metadata for docker.io/library/golang:1.27.0
+#5 DONE 0.8s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 376B done
+#6 DONE 0.0s
+
+#7 [stage-1 1/4] FROM docker.io/library/alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+#7 resolve docker.io/library/alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f done
+#7 CACHED
+
+#8 [internal] load build context
+#8 transferring context: 373.03kB 0.0s done
+#8 DONE 0.0s
+
+#9 [build 1/6] FROM docker.io/library/golang:1.27.0@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146
+#9 resolve docker.io/library/golang:1.27.0@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146 done
+#9 sha256:3248ea96287c1c219864b234f06742e9bb4a50f6e1a1dc3b7d79b3eb379dd968 0B / 126B 0.2s
+#9 sha256:3248ea96287c1c219864b234f06742e9bb4a50f6e1a1dc3b7d79b3eb379dd968 126B / 126B 0.3s done
+#9 extracting sha256:3248ea96287c1c219864b234f06742e9bb4a50f6e1a1dc3b7d79b3eb379dd968 done
+#9 extracting sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1 done
+#9 DONE 0.3s
+
+#10 [build 2/6] WORKDIR /src
+#10 DONE 0.0s
+
+#11 [build 3/6] COPY go.mod go.sum ./
+#11 DONE 0.0s
+
+#12 [build 4/6] RUN --mount=type=cache,target=/go/pkg/mod go mod download
+#12 ...
+
+#13 [stage-1 2/4] RUN apk add --no-cache ca-certificates     && addgroup -g 10001 beesuh     && adduser -D -u 10001 -G beesuh beesuh     && mkdir -p /app /data     && chown beesuh:beesuh /app /data
+#13 0.205 fetch https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/APKINDEX.tar.gz
+#13 0.506 fetch https://dl-cdn.alpinelinux.org/alpine/v3.22/community/aarch64/APKINDEX.tar.gz
+#13 1.110 (1/1) Installing ca-certificates (20261020-r0)
+#13 1.161 Executing busybox-1.37.0-r20.trigger
+#13 1.171 Executing ca-certificates-20261020-r0.trigger
+#13 1.191 OK: 8 MiB in 17 packages
+#13 DONE 1.3s
+
+#12 [build 4/6] RUN --mount=type=cache,target=/go/pkg/mod go mod download
+#12 DONE 22.0s
+
+#14 [build 5/6] COPY . .
+#14 DONE 0.1s
+
+#15 [build 6/6] RUN --mount=type=cache,target=/go/pkg/mod     --mount=type=cache,target=/root/.cache/go-build     CGO_ENABLED=0 GOOS=linux GOARCH=arm64     go build -trimpath -ldflags="-s -w" -o /out/beesuh ./cmd/beesuh
+#15 DONE 76.5s
+
+#16 [stage-1 3/4] COPY --from=build /out/beesuh /usr/local/bin/beesuh
+#16 DONE 0.6s
+
+#17 [stage-1 4/4] WORKDIR /app
+#17 DONE 0.0s
+
+#18 exporting to image
+#18 exporting layers
+#18 exporting layers 2.4s done
+#18 exporting manifest sha256:67c891f119f05cf6edb725c126ed6266e8b79b06b14c99f3eb31172ae9865660 done
+#18 exporting config sha256:b6f6692cf970ff3a4dc496c11244b53386cedc94c7cf8b7618a6fbc13184cc89 done
+#18 exporting attestation manifest sha256:a49fc7f84cc14170288c90b3da349e7b4cfa1153c044d21ae51630dd7db9cddf 0.0s done
+#18 exporting manifest list sha256:e0ca26a0f916fefb57a83324d9d080d450cc9e17dae822549e7b5cf9116101b6 done
+#18 naming to docker.io/library/beesuh-container-live:20261026-0550 done
+#18 unpacking to docker.io/library/beesuh-container-live:20261026-0550
+#18 unpacking to docker.io/library/beesuh-container-live:20261026-0550 0.5s done
+#18 DONE 2.9s

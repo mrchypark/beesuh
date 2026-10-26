@@ -1,0 +1,11 @@
+FIXTURE beesuh-live-_2VSrkicXb
+STEP build actual Goauthy standalone binary
+PASS real Goauthy HTTPS startup
+PASS real password login and browser session
+PASS confidential managed consumer authorization code + S256 PKCE
+PASS Docker Beesuh lists actual Goauthy connection without model dispatch
+PASS real Goauthy handoff page and CSRF approval + callback state
+PASS Docker Beesuh verifies and selects approved binding
+Sanitized failure evidence: /var/folders/r4/bygqtzg554v3dh6zd8z41zgw0000gn/T/beesuh-goauthy-live-1738468216.failure.log
+FAIL: POST /v1/chat status=503 want=200
+cleanup unverified, owned resources: beesuh-live-_2VSrkicXb-bee, beesuh-live-_2VSrkicXb-auth

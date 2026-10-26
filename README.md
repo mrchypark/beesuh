@@ -60,7 +60,7 @@ go run ./cmd/beesuh \
 
 ```sh
 export BEESUH_API_TOKEN='replace-with-a-long-random-private-token'
-go run ./cmd/beesuh -listen 127.0.0.1:8080
+go run ./cmd/beesuh -listen 127.0.0.1:8080 -operator-http
 ```
 
 서버가 실행 중인 상태에서 **다른 터미널**에 같은 `BEESUH_API_TOKEN`을 설정한 뒤
@@ -84,10 +84,22 @@ curl http://127.0.0.1:8080/v1/chat \
 
 **이 토큰은 신뢰된 운영자·서비스용입니다.** 토큰 보유자는 workspace와 session을
 선택하고 기록을 조회할 수 있습니다. 사용자별 권한을 구분하는 로그인 토큰이 아닙니다.
-외부에 제공하는 다중 사용자 서비스는 검증한 `Principal`을 받는
+Go 라이브러리를 임베딩하는 다중 사용자 서비스는 검증한 `Principal`을 받는
 `httpapi.NewAuthenticated`와 사용자·workspace 권한 검사, 연결별 credential resolver를
 구현해야 합니다. 이 모드에서는 `connection_id`가 필수이며 연결 등록은 서비스의
 신뢰된 코드에서 수행합니다. 자세한 계약은 [연결 관리](docs/connections-design.md)를 참고하세요.
+
+도커 HTTP 서버는 기존 OAuth2 introspection과 OIDC UserInfo로 사용자를
+검증합니다. Goauthy 조회 모드에서는 검증된 사용자마다 개인 workspace를 사용합니다. 모델이 OAuth Bearer를 지원하면
+대상 토큰을 검증해 전달하거나 선택적으로 RFC 8693 token exchange를 사용합니다.
+외부 서비스에 Beesuh 전용 API를 추가할 필요는 없습니다.
+[OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
+Goauthy 연동에는 사용자별 연결 설정 대신 전역 `goauthy.providers` 라우팅만 둡니다.
+`GET /v1/connection-options`로 기존 Goauthy API의 내 연결을 조회하고,
+기존 Goauthy 화면에서 사용자가 승인한 연결 참조를 `POST /v1/connections`로 선택합니다.
+실행할 때 소유자·소비자·resource·scope와 현재 승인을 다시 확인하고, 기존 전달 API에서
+키를 한 번만 가져와 메모리에서 사용합니다. 이 키 전달 프로토콜 자체는 OAuth 표준이 아닙니다.
+아래 공용 키 예제는 명시적인 `-operator-http` 모드로 실행합니다.
 
 ## Docker로 실행하기
 
@@ -102,7 +114,7 @@ docker run --rm --platform linux/amd64 \
   -v beesuh-data:/data \
   -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL \
   -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
-  "$BEESUH_IMAGE"
+  "$BEESUH_IMAGE" -listen 0.0.0.0:8080 -data-dir /data -operator-http
 ```
 
 위 HTTP 요청 예제로 대화할 수 있습니다. 이미지는 Linux amd64용이며,

@@ -1,0 +1,10 @@
+Task-local mistake_candidates (parent triage; no memory promotion):
+1. verification: name-only cleanup claim missed exited container 870e6a9aba41.
+Expected: actual resource absence. Boundary: cleanup verifier.
+Observed fix: recorded IDs plus full/label-filtered inventories; successful run independently verified.
+2. verification: restart reused ephemeral host port after Dory reassigned it.
+Expected: readiness targets current published endpoint. Boundary: runner restart.
+Observed fix: refreshBeeURL after restart; live proof 32776 -> 32777 and full rerun passed.
+3. verification: Alpine BusyBox wget lacked --ca-certificate option.
+Expected: actual supported verified-TLS probe. Boundary: fixture probe.
+Observed fix: Go TLS helper with configured root CA; in-network model full run passed.

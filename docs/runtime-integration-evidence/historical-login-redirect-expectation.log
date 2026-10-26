@@ -1,0 +1,4 @@
+FIXTURE beesuh-live-BeOo95Cez8
+STEP build actual Goauthy standalone binary
+PASS real Goauthy HTTPS startup
+FAIL: POST /auth/login status=303 want=302

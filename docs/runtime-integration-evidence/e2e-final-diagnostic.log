@@ -1,0 +1,14 @@
+real Goauthy route counts: {"credential":0,"introspection":0,"token":1,"userinfo":0}
+model accepted requests: 0
+b5e4a275f6dfae2a16434b233bc9fab251e2732be9e97b3e20a3f58264fbf997
+running 0
+
+2026/10/26 06:24:53 failed to sufficiently increase receive buffer size (was: 208 kiB, wanted: 7168 kiB, got: 416 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+2026/10/26 06:24:54 ERROR SCIM worker stopped
+2026/10/26 06:24:54 INFO master-key reference status active_master_key_id=dev-1 safe=true scan_error=false passkey_enabled=false signing_total=1 signing_non_active=0 dcr_total=0 dcr_non_active=0 upstream_total=0 upstream_non_active=0 login_revoke_total=0 login_revoke_non_active=0 generated_api_key_bootstrap_total=0 generated_api_key_bootstrap_non_active=0 kv_access_total=0 kv_access_non_active=0 kv_values_total=0 kv_values_non_active=0 saas_credentials_total=0 saas_credentials_non_active=0 saas_providers_total=0 saas_providers_non_active=0 saas_authorizations_total=0 saas_authorizations_non_active=0 auth_provider_secrets_total=0 auth_provider_secrets_non_active=0 passkey_total=0 passkey_non_active=0 passkey_legacy=0
+
+7ac78b63575afcd48d7ab3cfe5c0a83340d4cf599be6c94c6422412da2f51b82
+running 0
+
+2026/10/26 06:24:55 failed to sufficiently increase receive buffer size (was: 208 kiB, wanted: 7168 kiB, got: 416 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+beesuh listening on [::]:8080

@@ -1,0 +1,25 @@
+FIXTURE beesuh-live-M34xNrQRNb
+IMAGE sha256:e0ca26a0f916fefb57a83324d9d080d450cc9e17dae822549e7b5cf9116101b6
+SOURCE beesuh HEAD=f8a44022244fc5c6ac0a200315e5da906f41d8f7 dirty=true working-tree-sha256=d5c3282bea323012dd74d5e23e6b2a908f9b34c48172d1838d29ca295ba68446
+SOURCE goauthy HEAD=ee8e2f920fafa8e09111d4b3f0ba999a759d0d6c dirty=true working-tree-sha256=b95f3d7665d576907b35a3620ace20391e4957bf266b42bcdc1b3bbbe03db5cf
+STEP build actual Goauthy standalone binary
+GOAUTHY-BINARY sha256=0633ca0e731c6e9e23a64a1b4b48b990abc89686c1fd7947bbe61a70f2f9c98d
+NETWORK 9710284390ebb0afa04f52bdbba809fa521a3b97f622e2ce2ca6740c20d42e9c
+CONTAINER auth 3379e359988223f3cf112c893afe002b0d9e3e80794773402c90de3182d825ba
+PASS real Goauthy HTTPS startup
+PASS real password login and browser session
+PASS confidential managed consumer authorization code + S256 PKCE
+CONTAINER bee 11362af010a4ffe6f3ff8527450504a7a85140e62e8bf87c74a1043a3d82d23f
+PASS Docker Beesuh lists actual Goauthy connection without model dispatch
+COUNTERS credential=0 model=0 token=1 introspection=4 userinfo=2
+COUNTERS credential=0 model=0 token=1 introspection=6 userinfo=3
+PASS unapproved binding rejected without credential retrieval
+PASS real Goauthy handoff page and CSRF approval + callback state
+PASS Docker Beesuh verifies and selects approved binding
+COUNTERS credential=0 model=0 token=1 introspection=11 userinfo=6
+PASS Docker model execution using real Goauthy vault delivery
+COUNTERS credential=1 model=1 token=1 introspection=23 userinfo=16
+PASS confidential managed consumer authorization code + S256 PKCE
+Sanitized failure evidence: /var/folders/r4/bygqtzg554v3dh6zd8z41zgw0000gn/T/beesuh-goauthy-live-3824959601.failure.log
+PASS owned container IDs, run inventories, network and temp cleanup verified
+FAIL: Beesuh restart readiness failed

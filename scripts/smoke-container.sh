@@ -9,7 +9,7 @@ container=$(docker run -d --rm \
   -e BEESUH_API_TOKEN=smoke-test-only \
   -e BEESUH_MODEL_URL=http://127.0.0.1:9/v1 \
   -e BEESUH_MODEL=smoke \
-  "$image")
+  "$image" -listen 0.0.0.0:8080 -data-dir /data -operator-http)
 cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
 trap cleanup EXIT HUP INT TERM
 

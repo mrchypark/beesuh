@@ -1,0 +1,2 @@
+# beesuh-goauthy-live
+./main.go:243:54: f.sourceEvidence undefined (type *fixture has no field or method sourceEvidence)

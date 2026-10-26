@@ -1,0 +1,6 @@
+Historical failures are superseded by e2e-port-refresh.log (exit 0) and independent cleanup.
+Includes historical-*.log, e2e-chat-503.log, e2e-transient-daemon.log,
+e2e-unsupported-probe.log, e2e-go-tls-host-model.log, e2e-host-model-final-attempt.log,
+e2e-container-model.log, and associated earlier *diagnostic.log / *cleanup.log.
+Successful final aliases: e2e-final.log and e2e-final-cleanup.log.
+Successful earlier complete pass: e2e-container-model-restart.log.

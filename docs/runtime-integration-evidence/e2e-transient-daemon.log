@@ -1,0 +1,6 @@
+FIXTURE beesuh-live-Crqsq4XsWq
+STEP build actual Goauthy standalone binary
+Sanitized failure evidence: /var/folders/r4/bygqtzg554v3dh6zd8z41zgw0000gn/T/beesuh-goauthy-live-4102709773.failure.log
+FAIL: docker failed: exit status 1: failed to connect to the docker API at unix:///Users/cypark/.dory/dory.sock; check if the path is correct and if the daemon is running: dial unix /Users/cypark/.dory/dory.sock: connect: no such file or directory
+
+cleanup unverified, owned resources: beesuh-live-Crqsq4XsWq

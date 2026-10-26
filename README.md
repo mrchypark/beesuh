@@ -107,7 +107,7 @@ Go 설치 없이 실행하려면 `ghcr.io/mrchypark/beesuh` 이미지를 사용�
 빠른 시작의 모델 환경 변수와 위의 `BEESUH_API_TOKEN`을 먼저 설정하세요.
 
 ```sh
-BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:latest
+BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:v0.1.0
 docker pull --platform linux/amd64 "$BEESUH_IMAGE"
 docker run --rm --platform linux/amd64 \
   -p 127.0.0.1:8080:8080 \
@@ -118,8 +118,11 @@ docker run --rm --platform linux/amd64 \
 ```
 
 위 HTTP 요청 예제로 대화할 수 있습니다. 이미지는 Linux amd64용이며,
-`main`의 CI 검사를 통과한 빌드에 `latest`와 전체 커밋 SHA 태그를 게시하도록
-설정되어 있습니다. 배포 버전을 고정하려면 `latest` 대신 커밋 SHA를 사용하세요.
+릴리스를 게시하면 해당 버전 태그의 코드를 CI로 검사한 뒤 같은 버전 태그로만
+이미지를 게시합니다. `latest`와 커밋 SHA 태그는 게시하지 않습니다.
+기존 버전의 이미지를 게시하려면 `main`에서 CI 워크플로를 수동 실행하고
+`release_tag`에 기존 태그(예: `v0.1.0`)를 입력하세요. 모든 검사와 이미지 빌드는
+해당 태그의 커밋을 사용하며, 기존 Git 태그는 변경하지 않습니다.
 
 컨테이너는 UID/GID `10001`로 실행합니다. `/data` 볼륨에는 대화와 실행 기록이
 남습니다. 호스트 디렉터리를 연결한다면 해당 UID의 쓰기 권한이 필요합니다.

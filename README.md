@@ -72,87 +72,85 @@ go run ./cmd/beesuh \
 
 ## HTTP API로 사용하기
 
-모델 환경 변수는 빠른 시작과 동일합니다. 추가로 운영자용 bearer token을 설정합니다.
+독립 HTTP 서버는 외부 인증 서비스의 OAuth2 introspection과 OIDC UserInfo로
+사용자를 검증하고, 사용자가 Goauthy에서 승인한 연결로 모델을 실행합니다.
+`-listen`에는 `-service-config`와 `-providers`가 필요하며 backend는 `native`여야 합니다.
+서비스 설정과 자격증명이 없는 provider 설정은
+[OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
 
 ```sh
-export BEESUH_API_TOKEN='replace-with-a-long-random-private-token'
-go run ./cmd/beesuh -listen 127.0.0.1:8080 -operator-http
+go run ./cmd/beesuh -listen 127.0.0.1:8080 \
+  -service-config ./config/service.json -providers ./config/providers.json
 ```
 
-서버가 실행 중인 상태에서 **다른 터미널**에 같은 `BEESUH_API_TOKEN`을 설정한 뒤
-요청합니다. 서버와 CLI가 같은 데이터 디렉터리를 동시에 사용해서는 안 됩니다.
+호스트 애플리케이션에서 로그인한 사용자의 access token으로
+`GET /v1/connection-options`를 호출해 연결 후보를 조회합니다. 사용자는 기존
+Goauthy 승인 화면에서 Beesuh의 연결 사용을 승인한 뒤, 해당 참조를 선택합니다.
+
+```sh
+curl http://127.0.0.1:8080/v1/connections \
+  -H "Authorization: Bearer $HUMAN_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"collection_id":"models","connection_id":"my-connection","grant_id":"approved-grant"}'
+```
+
+응답의 `id`와 `workspace_id`를 사용해 대화를 요청합니다. 각 사용자는 검증된
+`(issuer, sub)`에 대응하는 개인 workspace를 사용합니다.
 
 ```sh
 curl http://127.0.0.1:8080/v1/chat \
-  -H "Authorization: Bearer $BEESUH_API_TOKEN" \
+  -H "Authorization: Bearer $HUMAN_ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"workspace_id":"personal","session_key":"chat-1","request_id":"http-1","message":"오늘 할 일을 정리해 줘."}'
+  -d '{"workspace_id":"<returned-workspace-id>","session_key":"chat-1","request_id":"http-1","connection_id":"<returned-id>","message":"오늘 할 일을 정리해 줘."}'
 ```
 
-다음 API도 같은 bearer token을 요구합니다.
+다음 API도 같은 사용자 access token을 요구합니다.
 
 | API | 용도 |
 | --- | --- |
-| `GET /v1/status` | 실행·대기·차단 상태와 backend를 조회합니다. |
+| `GET /v1/status` | 독립 인증 서버에서는 제공하지 않으며 403을 반환합니다. |
 | `GET /v1/providers` | provider ID·종류·프로토콜·모델·기본값을 조회합니다. 비밀 설정은 반환하지 않습니다. |
-| `GET /v1/history?workspace_id=personal&session_key=chat-1` | native 대화의 최근 journal 기록을 최대 200개 조회합니다. |
-| `GET /v1/runs/http-1?workspace_id=personal` | 요청의 실행 상태와 결과를 조회합니다. |
+| `GET /v1/connections` | 선택한 연결의 로컬 참조를 조회합니다. |
+| `GET /v1/history?workspace_id=<returned-workspace-id>&session_key=chat-1` | 해당 사용자의 native 대화 기록을 조회합니다. |
+| `GET /v1/runs/http-1?workspace_id=<returned-workspace-id>` | 요청의 실행 상태와 결과를 조회합니다. |
 
-**이 토큰은 신뢰된 운영자·서비스용입니다.** 토큰 보유자는 workspace와 session을
-선택하고 기록을 조회할 수 있습니다. 사용자별 권한을 구분하는 로그인 토큰이 아닙니다.
-Go 라이브러리를 임베딩하는 다중 사용자 서비스는 검증한 `Principal`을 받는
-`httpapi.NewAuthenticated`와 사용자·workspace 권한 검사, 연결별 credential resolver를
-구현해야 합니다. 이 모드에서는 `connection_id`가 필수이며 연결 등록은 서비스의
-신뢰된 코드에서 수행합니다. 자세한 계약은 [연결 관리](docs/connections-design.md)를 참고하세요.
-
-도커 HTTP 서버는 기존 OAuth2 introspection과 OIDC UserInfo로 사용자를
-검증합니다. Goauthy 조회 모드에서는 검증된 사용자마다 개인 workspace를 사용합니다. 모델이 OAuth Bearer를 지원하면
-대상 토큰을 검증해 전달하거나 선택적으로 RFC 8693 token exchange를 사용합니다.
-외부 서비스에 Beesuh 전용 API를 추가할 필요는 없습니다.
-[OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
-Goauthy 연동에는 사용자별 연결 설정 대신 전역 `goauthy.providers` 라우팅만 둡니다.
-`GET /v1/connection-options`로 기존 Goauthy API의 내 연결을 조회하고,
-기존 Goauthy 화면에서 사용자가 승인한 연결 참조를 `POST /v1/connections`로 선택합니다.
-실행할 때 소유자·소비자·resource·scope와 현재 승인을 다시 확인하고, 기존 전달 API에서
-키를 한 번만 가져와 메모리에서 사용합니다. 이 키 전달 프로토콜 자체는 OAuth 표준이 아닙니다.
-아래 공용 키 예제는 명시적인 `-operator-http` 모드로 실행합니다.
+실행할 때마다 소유자·소비자·resource·scope와 현재 승인을 다시 확인하고,
+기존 Goauthy 전달 API에서 받은 자격증명을 메모리에서만 사용합니다.
+승인이 없거나 철회되었거나 외부 검증에 실패하면 실행을 거부합니다.
+사용자별 정적 `connections` 설정과 `-operator-http`는 지원하지 않습니다.
+`BEESUH_API_TOKEN`, 공용 모델 키, 로컬 Codex 로그인, Conductor 자격증명으로
+HTTP 인증이나 모델 연결을 대신할 수 없습니다. Go 라이브러리의 인증 콜백과
+로컬 CLI의 자격증명 설정은 그대로 사용할 수 있습니다.
 
 ## Docker로 실행하기
 
-Go 설치 없이 실행하려면 `ghcr.io/mrchypark/beesuh` 이미지를 사용합니다.
-빠른 시작의 모델 환경 변수와 위의 `BEESUH_API_TOKEN`을 먼저 설정하세요.
-
-```sh
-BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:v0.2.0
-docker pull --platform linux/amd64 "$BEESUH_IMAGE"
-docker run --rm --platform linux/amd64 \
-  -p 127.0.0.1:8080:8080 \
-  -v beesuh-data:/data \
-  -e BEESUH_API_TOKEN -e BEESUH_MODEL_URL \
-  -e BEESUH_MODEL -e BEESUH_MODEL_API_KEY \
-  "$BEESUH_IMAGE" -listen 0.0.0.0:8080 -data-dir /data -operator-http
-```
-
-위 HTTP 요청 예제로 대화할 수 있습니다. 이미지는 Linux amd64용이며,
-릴리스를 게시하면 해당 버전 태그의 코드를 CI로 검사한 뒤 같은 버전 태그로만
-이미지를 게시합니다. `latest`와 커밋 SHA 태그는 게시하지 않습니다.
-기존 버전의 이미지를 게시하려면 `main`에서 CI 워크플로를 수동 실행하고
-`release_tag`에 기존 태그(예: `v0.1.0`)를 입력하세요. 모든 검사와 이미지 빌드는
-해당 태그의 커밋을 사용하며, 기존 Git 태그는 변경하지 않습니다.
-
-컨테이너는 UID/GID `10001`로 실행합니다. `/data` 볼륨에는 대화와 실행 기록이
-남습니다. 호스트 디렉터리를 연결한다면 해당 UID의 쓰기 권한이 필요합니다.
-같은 볼륨은 한 인스턴스만 사용하세요.
-
-로컬 빌드는 다음 명령을 사용합니다.
+아래 명령은 현재 소스로 이미지를 빌드합니다. `config/service.json`과
+`config/providers.json`을 준비하고, 별도 OAuth 클라이언트 비밀 파일을 연결하세요.
+[서비스 설정 예제](docs/http-service-adapter.md)의 비밀 파일 경로는
+`/run/beesuh-client-secret`입니다.
 
 ```sh
 docker build --platform linux/amd64 -t beesuh:local .
+docker run --rm --platform linux/amd64 \
+  -p 127.0.0.1:8080:8080 \
+  -v beesuh-service-data:/data \
+  -v "$PWD/config:/config:ro" \
+  -v "$PWD/oauth-client-secret:/run/beesuh-client-secret:ro" \
+  beesuh:local -listen 0.0.0.0:8080 -data-dir /data \
+  -service-config /config/service.json -providers /config/providers.json
 ```
 
-이후 실행 예제의 `BEESUH_IMAGE`를 `beesuh:local`로 바꾸면 됩니다.
-이미지에는 Codex CLI가 포함되어 있지 않습니다. `codex-cli` provider를 컨테이너에서
-사용하려면 Alpine 호환 실행 파일과 로그인 프로파일을 별도로 제공해야 합니다.
+위 HTTP 요청 예제로 연결을 선택하고 대화할 수 있습니다. 컨테이너는 UID/GID
+`10001`로 실행하므로 설정과 비밀 파일을 이 UID가 읽을 수 있어야 합니다.
+`/data`에는 대화와 실행 기록이 남습니다. 호스트 디렉터리를 연결하면 이 UID의
+쓰기 권한도 필요합니다. 같은 데이터 볼륨은 한 인스턴스만 사용하세요.
+기존 운영자 모드 데이터는 사용자 인증 모드로 전환할 수 없으므로 새 볼륨을 사용합니다.
+
+릴리스를 게시하면 해당 버전 태그의 코드를 CI로 검사한 뒤 같은 버전 태그로만
+`ghcr.io/mrchypark/beesuh`에 이미지를 게시합니다. `latest`와 커밋 SHA 태그는
+게시하지 않습니다. 기존 버전을 게시하려면 `main`에서 CI 워크플로를 수동 실행하고
+`release_tag`에 기존 태그를 입력하세요. 검사와 이미지 빌드는 해당 태그의 커밋을
+사용하므로, 과거 버전의 실행 옵션은 그 버전 문서를 확인해야 합니다.
 
 ## 모델과 계정 설정
 

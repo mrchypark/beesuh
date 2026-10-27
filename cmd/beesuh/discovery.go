@@ -43,10 +43,15 @@ func (d *serviceDiscovery) configure(o *beesuh.Options) error {
 	if !d.valid() {
 		return errors.New("invalid Goauthy discovery configuration")
 	}
+	for _, cfg := range o.Native.Providers {
+		if !secureEndpoint(cfg.BaseURL) || !strings.HasPrefix(cfg.BaseURL, "https://") || cfg.HTTPClient != nil || (cfg.API != "" && cfg.API != "chat-completions" && cfg.API != "responses") || (cfg.Kind != "" && cfg.Kind != "openai-compatible" && cfg.Kind != "opencode-go" && cfg.Kind != "opencode-zen") {
+			return errors.New("Goauthy discovery requires Bearer-compatible HTTP providers")
+		}
+	}
 	d.endpoints = make(map[string]string)
 	for upstream, local := range d.Providers {
 		cfg, ok := o.Native.Providers[local]
-		if !ok || !secureEndpoint(cfg.BaseURL) || !strings.HasPrefix(cfg.BaseURL, "https://") || cfg.HTTPClient != nil || cfg.API == "anthropic" || (cfg.Kind != "" && cfg.Kind != "openai-compatible" && cfg.Kind != "opencode-go" && cfg.Kind != "opencode-zen") {
+		if !ok {
 			return errors.New("Goauthy discovery requires Bearer-compatible HTTP providers")
 		}
 		operation := "chat/completions"

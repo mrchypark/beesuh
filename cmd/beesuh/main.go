@@ -73,14 +73,16 @@ func run() error {
 		maxOutput           = flag.Int("max-output-tokens", 2048, "native maximum completion tokens")
 		tokenBudget         = flag.String("token-budget-policy", string(beesuh.TokenBudgetStrict), "native token budget policy: strict, advisory, or unlimited")
 		interactive         = flag.Bool("interactive", false, "read direct chat messages, one line at a time")
-		listen              = flag.String("listen", "", "serve direct chat HTTP; requires -service-config or -operator-http")
+		listen              = flag.String("listen", "", "serve authenticated chat HTTP; requires -service-config, -backend native and -providers")
 		serviceFile         = flag.String("service-config", "", "OAuth2/OIDC service configuration file")
-		operatorHTTP        = flag.Bool("operator-http", false, "explicitly enable shared-credential operator HTTP mode")
 		writeTimeout        = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
 	)
 	flag.Parse()
-	if *listen != "" && ((*serviceFile == "" && !*operatorHTTP) || (*serviceFile != "" && *operatorHTTP)) {
-		return errors.New("HTTP requires exactly one of -service-config or -operator-http")
+	if *listen != "" && (strings.TrimSpace(*serviceFile) == "" || *backend != "native" || strings.TrimSpace(*providersFile) == "") {
+		return errors.New("-listen requires -service-config, -backend native and -providers")
+	}
+	if *listen != "" && *conductorTools {
+		return errors.New("-listen forbids operator Conductor configuration")
 	}
 	if *serviceFile != "" && (*listen == "" || *backend != "native" || *providersFile == "") {
 		return errors.New("-service-config requires -listen, -backend native and -providers")
@@ -88,14 +90,9 @@ func run() error {
 	if !filepath.IsAbs(*directory) {
 		return errors.New("-directory must be absolute")
 	}
-	username := os.Getenv("OPENCODE_SERVER_USERNAME")
-	if username == "" {
-		username = "opencode"
-	}
 	options := beesuh.Options{
 		DataDir:       *dataDir,
 		BackendID:     *backendID,
-		OpenCode:      opencode.Config{BaseURL: *openCodeURL, Directory: *directory, Username: username, Password: os.Getenv("OPENCODE_SERVER_PASSWORD")},
 		MaxConcurrent: *maxConcurrent,
 		MaxWaiting:    *maxWaiting,
 		Timeout:       *timeout,
@@ -103,6 +100,13 @@ func run() error {
 			SessionsPerWorkspace: *retainedSessions, SessionsGlobal: *totalSessions,
 			PendingCreatesPerWorkspace: *pendingCreates, PendingCreatesGlobal: *totalCreates,
 			ConnectionsPerWorkspace: *retainedConnections, ConnectionsGlobal: *totalConnections},
+	}
+	if *backend == "opencode" {
+		username := os.Getenv("OPENCODE_SERVER_USERNAME")
+		if username == "" {
+			username = "opencode"
+		}
+		options.OpenCode = opencode.Config{BaseURL: *openCodeURL, Directory: *directory, Username: username, Password: os.Getenv("OPENCODE_SERVER_PASSWORD")}
 	}
 	var requestProvider string
 	switch *backend {
@@ -191,23 +195,11 @@ func run() error {
 	}
 	defer runtime.Close()
 	if *listen != "" {
-		var handler http.Handler
-		if service != nil {
-			for _, c := range service.Connections {
-				if err := runtime.RegisterConnection(ctx, c.connection(service.Issuer)); err != nil {
-					return err
-				}
-			}
-			handler, err = httpapi.NewAuthenticated(runtime, service.authenticate)
-			if err == nil && service.Goauthy != nil {
-				handler = service.discoveryHandler(runtime, handler)
-			}
-		} else {
-			handler, err = httpapi.New(runtime, os.Getenv("BEESUH_API_TOKEN"))
-		}
+		handler, err := httpapi.NewAuthenticated(runtime, service.authenticate)
 		if err != nil {
 			return err
 		}
+		handler = service.discoveryHandler(runtime, handler)
 		listener, err := net.Listen("tcp", *listen)
 		if err != nil {
 			return err

@@ -100,4 +100,4 @@ docker exec "$fixture" /tmp/smoke-issuer probe http://smoke-beesuh:8080/v1/provi
 docker logs "$fixture" >"$work/issuer.log" 2>&1
 grep -q 'validated introspection' "$work/issuer.log"
 grep -q 'validated userinfo' "$work/issuer.log"
-printf '%s\n' 'Container CLI, nonroot Rhiza startup, TLS-authenticated providers, 401 rejection, and invalid flags passed.'
+printf '%s\n' 'Container CLI, nonroot Rhiza startup, TLS-authenticated empty providers before connection selection, 401 rejection, and invalid flags passed.'

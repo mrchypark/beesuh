@@ -20,7 +20,7 @@ func TestProbe(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"providers":[{"id":"smoke"}]}`))
+		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
 	if err := probe(context.Background(), server.URL+"/v1/providers"); err != nil {
@@ -39,7 +39,11 @@ func TestProbeResponseRejectsFailures(t *testing.T) {
 		redirect bool
 	}{
 		{name: "wrong status", status: 500, body: `"smoke"`},
-		{name: "missing provider", status: 200, body: `{"providers":[]}`},
+		{name: "object instead of array", status: 200, body: `{"providers":[]}`},
+		{name: "provider exposed before selection", status: 200, body: `[{"id":"smoke"}]`},
+		{name: "null instead of array", status: 200, body: `null`},
+		{name: "malformed JSON", status: 200, body: `[`},
+		{name: "trailing JSON", status: 200, body: `[] []`},
 		{name: "oversized body", status: 200, body: strings.Repeat("x", (1<<20)+1)},
 		{name: "redirect", status: 302, redirect: true},
 	} {
@@ -69,7 +73,7 @@ func TestProbeRejectsBrokenAuth(t *testing.T) {
 					w.WriteHeader(401)
 					return
 				}
-				_, _ = w.Write([]byte(`"smoke"`))
+				_, _ = w.Write([]byte(`[]`))
 			}))
 			defer server.Close()
 			if err := probe(context.Background(), server.URL); err == nil {

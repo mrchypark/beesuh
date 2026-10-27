@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -95,8 +94,15 @@ func probeResponse(ctx context.Context, client *http.Client, url, token string, 
 	if resp.StatusCode != status {
 		return fmt.Errorf("status = %d, want %d", resp.StatusCode, status)
 	}
-	if status == http.StatusOK && !bytes.Contains(body, []byte(`"smoke"`)) {
-		return fmt.Errorf("providers response missing expected provider smoke")
+	if status == http.StatusOK {
+		// No connection is selected: service mode must not expose provider templates.
+		var providers []json.RawMessage
+		if err := json.Unmarshal(body, &providers); err != nil {
+			return fmt.Errorf("providers response must be a JSON array: %w", err)
+		}
+		if providers == nil || len(providers) != 0 {
+			return fmt.Errorf("providers response must be an empty array before connection selection")
+		}
 	}
 	return nil
 }

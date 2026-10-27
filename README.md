@@ -19,7 +19,7 @@ Beesuh는 모델 API를 직접 호출하고 대화와 실행 기록을 로컬에
 
 ## 빠르게 시작하기
 
-소스에서 실행하려면 **Go 1.27 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
+소스에서 실행하려면 **Go 1.27.3 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
 필요합니다. 메모·스킬 도구를 사용하려면 모델이 tool calling도 지원해야 합니다.
 
 ```sh
@@ -42,6 +42,22 @@ go run ./cmd/beesuh \
 메시지를 한 줄씩 입력하고 `/quit`으로 종료합니다. 응답은 JSON으로 출력됩니다.
 다시 실행할 때 같은 workspace와 session을 사용하면 대화가 이어집니다.
 데이터는 기본적으로 현재 디렉터리의 `.beesuh`에 저장됩니다.
+
+### 기존 Rhiza 데이터의 업그레이드
+
+**Rhiza v0.18.0으로 만든 데이터 디렉터리는 v0.20.0에서 다시 열 수 없습니다.**
+SQL 실행 정책이 4에서 7로 바뀌어 기존 SQLite 상태, WAL 기록과 체크포인트가
+거부됩니다. 바이너리만 교체하거나 기존 파일을 새 디렉터리로 복사해서는
+마이그레이션할 수 없으며, 자동 변환도 제공되지 않습니다.
+
+기존 데이터가 있다면 쓰기를 중지하고 이전 바이너리와 데이터 및 복구 자료를
+보존하세요. 이전 바이너리에서 실제 애플리케이션 데이터를 논리적으로 내보낸 뒤,
+새 데이터 디렉터리에 새 SQL 요청으로 가져와 검증해야 합니다.
+기존 QLog, `_rhiza_` 영수증, 적용 슬롯과 마이그레이션 원장은 가져오지 않습니다.
+이전 요청 ID의 재시도 보장도 이전되지 않습니다. 구체적인 절차는
+[Rhiza v0.20.0의 저장 형식 호환성과 논리적 마이그레이션 안내](https://github.com/mrchypark/rhiza/blob/v0.20.0/docs/sql-execution-policy.md)를
+따르세요. Beesuh는 자동 데이터 이전 명령을 제공하지 않습니다.
+이번 변경에서 기존 데이터는 변환하지 않습니다.
 
 한 번만 요청하려면 다음과 같이 실행합니다.
 
@@ -107,7 +123,7 @@ Go 설치 없이 실행하려면 `ghcr.io/mrchypark/beesuh` 이미지를 사용�
 빠른 시작의 모델 환경 변수와 위의 `BEESUH_API_TOKEN`을 먼저 설정하세요.
 
 ```sh
-BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:v0.1.0
+BEESUH_IMAGE=ghcr.io/mrchypark/beesuh:v0.2.0
 docker pull --platform linux/amd64 "$BEESUH_IMAGE"
 docker run --rm --platform linux/amd64 \
   -p 127.0.0.1:8080:8080 \

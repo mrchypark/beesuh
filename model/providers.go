@@ -65,8 +65,13 @@ func loadProviders(path string, service bool) (map[string]Config, string, error)
 			return nil, "", fmt.Errorf("model: duplicate provider ID %q", entry.ID)
 		}
 		cfg := entry.Config
-		if service && cfg.APIKeyEnv != "" {
-			return nil, "", errors.New("model: service providers forbid credential environment references")
+		if service {
+			if cfg.APIKeyEnv != "" || cfg.APIKey != "" || cfg.Command != "" || cfg.CodexHome != "" || cfg.CodexAuth != nil || cfg.CodexAccountID != "" {
+				return nil, "", errors.New("model: service providers forbid shared credentials and login stores")
+			}
+			if (cfg.Kind != "" && cfg.Kind != "openai-compatible" && cfg.Kind != "opencode-go" && cfg.Kind != "opencode-zen") || (cfg.API != "" && cfg.API != "chat-completions" && cfg.API != "responses") {
+				return nil, "", errors.New("model: service providers require Bearer-compatible HTTP providers")
+			}
 		}
 		if cfg.APIKeyEnv != "" {
 			if !envName.MatchString(cfg.APIKeyEnv) {

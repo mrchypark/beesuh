@@ -160,12 +160,11 @@ func TestSingleNodeDurableRecoveryHelper(t *testing.T) {
 		t.Fatalf("not a ready single voter: %+v, err=%v", status, err)
 	}
 	if err != nil {
-		// Rhiza v0.20.0 gates MembershipStatus on AdminToken, which Open omits.
-		// Its node.loadClusterConfig defaults empty Members to [beesuh], quorum 1.
+		// Embedded configuration omits admin credentials; check membership when available.
 		if !errors.Is(err, rhiza.ErrNotReady) {
 			t.Fatalf("membership status: %v", err)
 		}
-		t.Log("ready embedded Rhiza; membership status unavailable without AdminToken; single-voter default verified in source")
+		t.Log("embedded Rhiza ready; membership API unavailable; acknowledged local writes and reopen checked below")
 	} else {
 		t.Logf("actual Rhiza membership: node=%s voters=%v voting=%v config=%d; majority quorum=1", status.NodeID, status.Voters, status.Voting, status.ConfigID)
 	}

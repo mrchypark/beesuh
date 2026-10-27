@@ -28,7 +28,7 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 	const secret = "discovery-client-secret"
 	const resource = "https://goauthy.example/connections"
 	var deliveries, models, metadata atomic.Int32
-	var revoked, wrongOwner, wrongConsumer, restarted atomic.Bool
+	var revoked, wrongOwner, wrongConsumer, restarted, grantExpired, wrongGeneration, wrongProvider, infoOutage atomic.Bool
 	var issuer string
 	expires := time.Now().Add(time.Hour).UnixMilli()
 
@@ -53,6 +53,10 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 			t.Error("authority did not receive current user bearer only")
 		}
 		if r.URL.Path == "/userinfo" {
+			if infoOutage.Load() {
+				http.Error(w, "private outage", 503)
+				return
+			}
 			if r.Method != "GET" {
 				t.Error("userinfo method")
 			}
@@ -73,11 +77,21 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 		case "/auth/v1/connections/models/personal":
 			json.NewEncoder(w).Encode(connection)
 		case "/auth/v1/connections/models/personal/grants/approved":
+			generation, providerID, expiry := "generation", "external", expires
+			if wrongGeneration.Load() {
+				generation = "different-generation"
+			}
+			if wrongProvider.Load() {
+				providerID = "unmapped"
+			}
+			if grantExpired.Load() {
+				expiry = time.Now().Add(-time.Minute).UnixMilli()
+			}
 			consumer := "beesuh"
 			if wrongConsumer.Load() {
 				consumer = "other"
 			}
-			json.NewEncoder(w).Encode(map[string]any{"connection_generation": "generation", "grant": map[string]any{"id": "approved", "owner_subject": owner, "collection_id": "models", "connection_id": "personal", "consumer_client_id": consumer, "mode": "credential_delivery", "resource": resource, "generation": "generation", "consumer_generation": "consumer-generation", "provider_id": "external", "connector_digest": "digest", "revision": 1, "provider_revision": 1, "expires_at_unix_ms": expires, "revoked": revoked.Load()}})
+			json.NewEncoder(w).Encode(map[string]any{"connection_generation": "generation", "grant": map[string]any{"id": "approved", "owner_subject": owner, "collection_id": "models", "connection_id": "personal", "consumer_client_id": consumer, "mode": "credential_delivery", "resource": resource, "generation": generation, "consumer_generation": "consumer-generation", "provider_id": providerID, "connector_digest": "digest", "revision": 1, "provider_revision": 1, "expires_at_unix_ms": expiry, "revoked": revoked.Load()}})
 		case "/auth/v1/connections/models/personal/grants/unapproved":
 			http.Error(w, `{"error":"access_denied"}`, http.StatusForbidden)
 		case "/auth/v1/connection-grants/approved/credential":
@@ -146,7 +160,7 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 	providers := writeJSON("providers.json", map[string]any{"default": "p", "providers": []any{map[string]string{"id": "p", "kind": "openai-compatible", "base_url": provider.URL + "/v1", "model": "test"}}})
 	checkSecrets := func(b []byte) {
 		t.Helper()
-		for _, s := range []string{login, fresh, key, secret} {
+		for _, s := range []string{login, fresh, key, secret, "ambient-global-key", "operator-shared-token", "ambient-conductor-token"} {
 			if bytes.Contains(b, []byte(s)) {
 				t.Error("secret exposed in response, process output, or persisted data")
 			}
@@ -155,7 +169,7 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 	start := func() (string, func()) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestOAuthBinaryProcess$", "--", "-listen", "127.0.0.1:0", "-service-config", config, "-providers", providers, "-data-dir", filepath.Join(dir, "data"))
-		cmd.Env = []string{"BEESUH_TEST_OAUTH_BINARY_PROCESS=1", "HOME=" + dir, "PATH=" + os.Getenv("PATH"), "SSL_CERT_FILE=" + ca}
+		cmd.Env = []string{"BEESUH_TEST_OAUTH_BINARY_PROCESS=1", "HOME=" + dir, "PATH=" + os.Getenv("PATH"), "SSL_CERT_FILE=" + ca, "BEESUH_MODEL_API_KEY=ambient-global-key", "BEESUH_API_TOKEN=operator-shared-token", "CONDUCTOR_TOKEN=ambient-conductor-token"}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -320,6 +334,21 @@ func TestDiscoveryBinaryEndToEnd(t *testing.T) {
 		t.Fatalf("missing history: %s", out)
 	}
 	assertCalls(1)
+	for _, tc := range []struct {
+		name   string
+		flag   *atomic.Bool
+		status int
+	}{
+		{"foreign owner", &wrongOwner, 403}, {"foreign consumer", &wrongConsumer, 403},
+		{"expired grant", &grantExpired, 403}, {"generation mismatch", &wrongGeneration, 403},
+		{"unmapped provider", &wrongProvider, 403}, {"userinfo outage", &infoOutage, 401},
+	} {
+		tc.flag.Store(true)
+		request("POST", "/v1/chat", chat(tc.name), tc.status)
+		assertCalls(1)
+		tc.flag.Store(false)
+	}
+
 	revoked.Store(true)
 	request("POST", "/v1/chat", chat("revoked"), 403)
 	assertCalls(1)

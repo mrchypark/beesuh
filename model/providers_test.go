@@ -77,3 +77,37 @@ func TestOpenCodeZenProtocols(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceProvidersRejectLocalCredentialSources(t *testing.T) {
+	t.Setenv("TEST_SERVICE_SHARED_KEY", "ambient-secret")
+	t.Setenv("BEESUH_MODEL_API_KEY", "global-secret")
+	file := filepath.Join(t.TempDir(), "providers.json")
+	for _, tc := range []struct {
+		name, fields string
+		valid        bool
+	}{
+		{"http routing", `"kind":"openai-compatible","base_url":"https://model.example/v1"`, true},
+		{"responses", `"kind":"opencode-zen","api":"responses"`, true},
+		{"env key", `"kind":"opencode-go","api_key_env":"TEST_SERVICE_SHARED_KEY"`, false},
+		{"literal key", `"kind":"opencode-go","api_key":"secret"`, false},
+		{"local cli login", `"kind":"codex-cli"`, false},
+		{"app server login", `"kind":"codex-app-server"`, false},
+		{"login home", `"kind":"openai-compatible","base_url":"https://model.example/v1","codex_home":"/tmp/login"`, false},
+		{"command", `"kind":"openai-compatible","base_url":"https://model.example/v1","command":"codex"`, false},
+		{"non bearer", `"kind":"opencode-zen","api":"anthropic"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := `{"providers":[{"id":"p","model":"test",` + tc.fields + `}]}`
+			if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			providers, _, err := LoadServiceProviders(file)
+			if (err == nil) != tc.valid {
+				t.Fatalf("service provider validity: %v", err)
+			}
+			if tc.valid && providers["p"].APIKey != "" {
+				t.Fatal("ambient key loaded")
+			}
+		})
+	}
+}

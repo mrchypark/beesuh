@@ -86,7 +86,7 @@ docker cp "$work/issuer" "$fixture:/tmp/smoke-issuer"
 docker cp "$work/config" "$fixture:/config"
 docker start "$fixture" >/dev/null
 
-container=$(docker create --network "$network" -p 127.0.0.1::8080 \
+container=$(docker create --network "$network" --network-alias smoke-beesuh \
   -e SSL_CERT_FILE=/config/ca.pem "$image" \
   -listen 0.0.0.0:8080 -backend native -data-dir /data \
   -providers /config/providers.json -service-config /config/service.json)
@@ -95,22 +95,8 @@ docker cp "$work/bee-config" "$container:/config"
 docker start "$container" >/dev/null
 test "$(docker inspect --format '{{.Config.User}}' "$container")" = beesuh
 test "$(docker exec "$container" id -u)" -ne 0
-port=$(docker port "$container" 8080/tcp | sed -n '1s/.*://p')
-case "$port" in ''|*[!0-9]*) exit 1 ;; esac
-url="http://127.0.0.1:$port/v1/providers"
-attempt=0
-until curl --silent --fail --max-time 2 \
-  -H 'Authorization: Bearer smoke-access-token' "$url" >"$work/providers.json"; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 30 ]; then exit 1; fi
-  sleep 1
-done
-grep -q '"smoke"' "$work/providers.json"
-status=$(curl --silent --max-time 2 -o "$work/rejected.json" -w '%{http_code}' "$url")
-test "$status" = 401
-status=$(curl --silent --max-time 2 -o "$work/rejected.json" -w '%{http_code}' \
-  -H 'Authorization: Bearer invalid-token' "$url")
-test "$status" = 401
+docker exec "$fixture" /tmp/smoke-issuer probe http://smoke-beesuh:8080/v1/providers \
+  >"$work/probe.log" 2>&1 || { cat "$work/probe.log" >&2; exit 1; }
 docker logs "$fixture" >"$work/issuer.log" 2>&1
 grep -q 'validated introspection' "$work/issuer.log"
 grep -q 'validated userinfo' "$work/issuer.log"

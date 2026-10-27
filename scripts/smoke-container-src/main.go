@@ -2,6 +2,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -21,6 +24,14 @@ import (
 const issuer = "https://smoke-issuer:8443"
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "probe" {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if err := probe(ctx, os.Args[2]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "init" {
 		if err := initialize(os.Args[2]); err != nil {
 			log.Fatal(err)
@@ -29,6 +40,65 @@ func main() {
 	}
 	server := &http.Server{Addr: ":8443", Handler: fixtureHandler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(server.ListenAndServeTLS("/config/ca.pem", "/config/key.pem"))
+}
+
+func probe(ctx context.Context, url string) error {
+	client := &http.Client{
+		Timeout:       2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	defer client.CloseIdleConnections()
+	var err error
+	for attempt := 0; attempt < 30; attempt++ {
+		err = probeResponse(ctx, client, url, "smoke-access-token", http.StatusOK)
+		if err == nil {
+			break
+		}
+		if attempt == 29 {
+			return fmt.Errorf("providers readiness: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("providers readiness: %w", ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
+	for _, token := range []string{"", "invalid-token"} {
+		if err := probeResponse(ctx, client, url, token, http.StatusUnauthorized); err != nil {
+			return fmt.Errorf("providers rejection (token present: %t): %w", token != "", err)
+		}
+	}
+	return nil
+}
+
+func probeResponse(ctx context.Context, client *http.Client, url, token string, status int) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	const maxBody = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maxBody {
+		return fmt.Errorf("response exceeds %d bytes", maxBody)
+	}
+	if resp.StatusCode != status {
+		return fmt.Errorf("status = %d, want %d", resp.StatusCode, status)
+	}
+	if status == http.StatusOK && !bytes.Contains(body, []byte(`"smoke"`)) {
+		return fmt.Errorf("providers response missing expected provider smoke")
+	}
+	return nil
 }
 
 func fixtureHandler() http.Handler {

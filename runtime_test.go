@@ -489,6 +489,9 @@ func TestRuntimeUncertainRequiresRecovery(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := InitStorage(context.Background(), data); err != nil {
+		t.Fatal(err)
+	}
 	r = openTestRuntime(t, f, data, 1)
 	t.Cleanup(func() { _ = r.Close() })
 	if _, err := r.Run(context.Background(), testRequest("agent", "later-restart", "three")); !errors.Is(err, ErrUncertain) {

@@ -11,10 +11,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mrchypark/beesuh/opencode"
@@ -213,20 +211,8 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(opts.DataDir, 0700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(filepath.Join(opts.DataDir, "runtime.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	db, f, err := openStorage(ctx, opts.DataDir)
 	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("beesuh: data directory is in use: %w", err)
-	}
-	db, err := rhiza.Open(ctx, rhiza.Config{NodeID: "beesuh", DataDir: filepath.Join(opts.DataDir, "rhiza"), PeerAddr: "127.0.0.1:0"})
-	if err != nil {
-		f.Close()
 		return nil, err
 	}
 	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock), capacity: opts.Capacity}

@@ -45,12 +45,13 @@ go run ./cmd/beesuh \
 
 ### 기존 Rhiza 데이터의 업그레이드
 
-Beesuh는 [Rhiza v0.21.0](https://github.com/mrchypark/rhiza/releases/tag/v0.21.0)으로 버전을 고정합니다.
+Beesuh는 [Rhiza v0.21.1](https://github.com/mrchypark/rhiza/tree/66e2416b52e3d64aa86134b7b0c8b70c5ace88be)
+(커밋 `66e2416b52e3d64aa86134b7b0c8b70c5ace88be`)로 버전을 고정합니다.
 이번 업그레이드는 새 DataDir로 시작하는 신규 환경을 대상으로 합니다.
 이는 기존 v0.20.0 임베디드 데이터의 물리적 형식이 호환되지 않는다는 뜻은 아닙니다.
-이 릴리스는 모든 Local 아카이브
+v0.21.1 문서가 설명하는 v0.21 계약에서는 모든 Local 아카이브
 형식(파일시스템, S3, GCS, Azure)을 변경하며, 자동 마이그레이션이나 기존 아카이브를
-그대로 채택하는 기능을 제공하지 않습니다. Local 아카이브를 설정한다면 아카이브
+그대로 채택하는 기능을 제공하지 않습니다. v0.21.1 자체가 새 형식 변경을 도입한다는 뜻은 아닙니다. Local 아카이브를 설정한다면 아카이브
 위치도 새로 지정하세요. 기존 데이터와 아카이브는 보존하세요.
 Beesuh는 LocalArchive를 명시하지 않고 임베디드 기본 설정을 사용합니다.
 이번 업그레이드로 원격 아카이브나 HA의 동작이 검증되거나,
@@ -141,7 +142,7 @@ HTTP 인증이나 모델 연결을 대신할 수 없습니다. Go 라이브러�
 `/run/beesuh-client-secret`입니다.
 
 ```sh
-docker build --platform linux/amd64 -t beesuh:local .
+docker buildx build --platform linux/amd64 --load -t beesuh:local .
 docker run --rm --platform linux/amd64 \
   -p 127.0.0.1:8080:8080 \
   -v beesuh-service-data:/data \
@@ -156,6 +157,21 @@ docker run --rm --platform linux/amd64 \
 `/data`에는 대화와 실행 기록이 남습니다. 호스트 디렉터리를 연결하면 이 UID의
 쓰기 권한도 필요합니다. 같은 데이터 볼륨은 한 인스턴스만 사용하세요.
 기존 운영자 모드 데이터는 사용자 인증 모드로 전환할 수 없으므로 새 볼륨을 사용합니다.
+
+로컬 CLI와 Docker는 시작 시 SDK를 열어 복구하므로 별도 init이 필요하지 않습니다.
+선택적으로 기존 writer를 완전히 중지한 뒤 현재 소스에서
+`go run ./cmd/beesuh -storage-init -data-dir /absolute/path/to/data`를 실행할 수 있습니다.
+이 명령은 동일한 SDK 설정과 `runtime.lock`을 사용해 저장소를 열고 닫으며,
+모델·provider·인증 설정이나 HTTP listener가 필요하지 않습니다.
+보존된 데이터의 로컬 초기화·재열기 검증용이며, 로컬 WAL 복구가 일어날 수 있습니다.
+Local 아카이브 복구 기능을 추가하거나 볼륨 손실을 복구하는 명령은 아닙니다.
+Kubernetes의 동일 이미지·PVC init 구성은 [배포 안내](deploy/kubernetes/README.md)를 따르세요.
+
+v0.4.0 릴리스용으로 준비한 Kubernetes 구성은 init과 메인에
+`ghcr.io/mrchypark/beesuh:v0.4.0`을 지정합니다.
+배포 전 해당 버전의 릴리스 CI와 이미지 게시 결과를 확인하세요.
+이 구성은 아카이브 없이 보존된 PVC를 사용하며 별도 Operator가 필요하지 않습니다.
+자세한 운영 조건과 검증 한계는 [단일 노드 운영](docs/single-node-operations.md)을 따르세요.
 
 릴리스를 게시하면 해당 버전 태그의 코드를 CI로 검사한 뒤 같은 버전 태그로만
 `ghcr.io/mrchypark/beesuh`에 이미지를 게시합니다. `latest`와 커밋 SHA 태그는
@@ -291,6 +307,7 @@ journal 조회는 지원하지 않으며, 기존 session을 native로 자동 이
 
 ## 문서
 
+- [Kubernetes 단일 노드 배포](deploy/kubernetes/README.md)
 - [모델 provider 설정](docs/providers.md): registry 형식, 프로토콜, 계정 선택
 - [사용자별 연결 관리](docs/connections-design.md): 인증된 서비스에 런타임 내장
 - [Codex 프로파일](docs/codex-profiles.md): 계정 격리와 실험적 인증 어댑터

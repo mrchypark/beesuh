@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: beesuh
+spec:
+  type: ClusterIP
+  selector:
+    app: beesuh
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -32,7 +32,11 @@ func main() {
 	}
 }
 
-func run() error {
+func closeWithError(err *error, close func() error) {
+	*err = errors.Join(*err, close())
+}
+
+func run() (err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -42,6 +46,7 @@ func run() error {
 		openCodeURL         = flag.String("opencode-url", "http://127.0.0.1:4096", "OpenCode server URL")
 		directory           = flag.String("directory", cwd, "absolute OpenCode working directory")
 		dataDir             = flag.String("data-dir", ".beesuh", "Rhiza data directory")
+		storageInit         = flag.Bool("storage-init", false, "initialize and validate retained local Rhiza storage without starting services; main uses the same -data-dir")
 		backendID           = flag.String("backend-id", "local", "OpenCode backend identity")
 		session             = flag.String("session", "", "required logical session key")
 		composInput         = flag.Bool("compos", false, "read Compos agent outbox data from stdin")
@@ -78,6 +83,23 @@ func run() error {
 		writeTimeout        = flag.Duration("write-timeout", 0, "maximum HTTP response duration; 0 derives it from -timeout plus the handler write budget")
 	)
 	flag.Parse()
+	if *storageInit {
+		if flag.NArg() != 0 {
+			return errors.New("unexpected positional arguments")
+		}
+		var incompatible string
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name != "storage-init" && f.Name != "data-dir" && incompatible == "" {
+				incompatible = f.Name
+			}
+		})
+		if incompatible != "" {
+			return fmt.Errorf("-storage-init cannot be combined with -%s", incompatible)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return beesuh.InitStorage(ctx, *dataDir)
+	}
 	if *listen != "" && (strings.TrimSpace(*serviceFile) == "" || *backend != "native" || strings.TrimSpace(*providersFile) == "") {
 		return errors.New("-listen requires -service-config, -backend native and -providers")
 	}
@@ -193,7 +215,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer runtime.Close()
+	defer closeWithError(&err, runtime.Close)
 	if *listen != "" {
 		handler, err := httpapi.NewAuthenticated(runtime, service.authenticate)
 		if err != nil {

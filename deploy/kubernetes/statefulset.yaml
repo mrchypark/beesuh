@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: beesuh
+spec:
+  serviceName: beesuh
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app: beesuh
+  template:
+    metadata:
+      labels:
+        app: beesuh
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: storage-init
+          image: ghcr.io/mrchypark/beesuh:v0.4.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/beesuh
+          args:
+            - -storage-init
+            - -data-dir
+            - /data/beesuh
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: beesuh
+          image: ghcr.io/mrchypark/beesuh:v0.4.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -listen
+            - 0.0.0.0:8080
+            - -backend
+            - native
+            - -data-dir
+            - /data/beesuh
+            - -service-config
+            - /config/service.json
+            - -providers
+            - /config/providers.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8080
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: oauth-client
+              mountPath: /run/beesuh-client-secret
+              subPath: client-secret
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: beesuh-config
+            items:
+              - key: service.json
+                path: service.json
+              - key: providers.json
+                path: providers.json
+        - name: oauth-client
+          secret:
+            secretName: beesuh-oauth-client
+            defaultMode: 0440
+            items:
+              - key: client-secret
+                path: client-secret
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOncePod]
+        resources:
+          requests:
+            storage: 10Gi

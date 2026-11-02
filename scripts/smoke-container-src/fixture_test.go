@@ -182,12 +182,70 @@ func TestGrantCredentialGoldenHash(t *testing.T) {
 	if fixtureCredentialDigest(authorization) != "sha256:328d64177ede33a5cf466892b8c77fe095c7f64c35175dc765757a04d6265b84" {
 		t.Fatal("fixture drifted from the domain/length-prefixed Grant credential digest")
 	}
-	// Independently computed from the literal lower-sorted two-selector preimage.
-	if fixtureHeaderDigest() != "sha256:63b6196fc43c2567e4e3105d288c284ff24f4109146a3322f2b8d8d2279a9774" {
-		t.Fatal("canonical selector header digest drifted")
-	}
 	if serviceAudience == grantHintAudience || serviceAudience == resource || grantHintAudience == resource || serviceAudience == "beesuh-smoke" || grantHintAudience == "beesuh-smoke" {
 		t.Fatal("fixture collapsed independent client/audience/resource/hint values")
+	}
+}
+
+func TestOperationForwardedHeaderDigests(t *testing.T) {
+	// Hashes independently computed from the exact lower-sorted LF preimages.
+	const selectors = "sha256:63b6196fc43c2567e4e3105d288c284ff24f4109146a3322f2b8d8d2279a9774"
+	const jsonHeaders = "sha256:093bc306da9e5a608f43c3ecf837898fb96159a87a29f31c9c3b34334069c9d4"
+	const charsetHeaders = "sha256:a1d2b89749f3f14a7a44d8a1bbba664c5946c0df36b55d60750d2f86e06cb8aa"
+	for _, tc := range []struct {
+		operation    string
+		contentTypes []string
+		want         string
+	}{
+		{"run_execute", []string{"application/json"}, jsonHeaders},
+		{"connection_select", []string{"application/json; charset=utf-8"}, charsetHeaders},
+		{"run_read", nil, selectors},
+		{"history_read", []string{"text/plain"}, selectors},
+		{"run_cancel", []string{"application/json; charset=utf-8"}, selectors},
+		{"connection_revoke", []string{"application/json"}, selectors},
+		{"run_execute", nil, ""},
+		{"connection_select", []string{"application/json", "application/json"}, ""},
+		{"run_execute", []string{"text/plain"}, ""},
+		{"connection_select", []string{"application/json; broken"}, ""},
+	} {
+		got, valid := fixtureHeaderDigest(tc.operation, tc.contentTypes)
+		if got != tc.want || valid != (tc.want != "") {
+			t.Fatalf("%s forward-list digest/validation mismatch", tc.operation)
+		}
+	}
+	spaced, _ := fixtureHeaderDigest("run_execute", []string{"application/json; charset=utf-8"})
+	compact, valid := fixtureHeaderDigest("run_execute", []string{"application/json;charset=utf-8"})
+	if !valid || spaced == compact {
+		t.Fatal("raw Content-Type spacing was normalized before hashing")
+	}
+}
+
+type fixtureRoundTrip func(*http.Request) (*http.Response, error)
+
+func (fn fixtureRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+
+func TestSharedExpectationUsesOriginalContentType(t *testing.T) {
+	const raw = "application/json; Charset=\"utf-8\""
+	calls := 0
+	client := &http.Client{Transport: fixtureRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			if r.URL.Path != "/smoke/expect" || r.Header.Get("Content-Type") != "application/json" {
+				t.Fatal("wrong fixture control transport")
+			}
+			var expectation fixtureExpectation
+			if err := json.NewDecoder(r.Body).Decode(&expectation); err != nil || len(expectation.ContentTypes) != 1 || expectation.ContentTypes[0] != raw {
+				t.Fatal("control expectation lost the original Bee HTTP Content-Type")
+			}
+		} else if calls != 2 || r.URL.Path != "/v1/chat" || r.Header.Get("Content-Type") != raw {
+			t.Fatal("business transport changed the original raw Content-Type")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	f := flow{context.Background(), client, "http://fixture-bee.invalid"}
+	_, err := f.sharedRequestContentTypes("POST", "/v1/chat", `{"workspace_id":"smoke-shared"}`, "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", []string{raw}, 200)
+	if err != nil || calls != 2 {
+		t.Fatalf("original Content-Type binding check: calls=%d error=%v", calls, err)
 	}
 }
 
@@ -196,10 +254,10 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 		t.Run(mutate, func(t *testing.T) {
 			policy := newFixturePolicy()
 			body := `{"workspace_id":"smoke-shared","message":"independent bytes"}`
-			policy.expected = fixtureExpectation{"POST", "/v1/chat", body, "smoke-access-token", "allow"}
+			policy.expected = fixtureExpectation{Method: "POST", Path: "/v1/chat", Body: body, Token: "smoke-access-token", Mode: "allow", ContentTypes: []string{"application/json; charset=utf-8"}}
 			wire := map[string]any{
 				"bodyDigest": fixtureDigest([]byte(body)), "bodyLength": len(body), "canonicalPath": "/v1/chat", "canonicalQuery": "",
-				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": fixtureHeaderDigest(), "method": "POST",
+				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": "sha256:a1d2b89749f3f14a7a44d8a1bbba664c5946c0df36b55d60750d2f86e06cb8aa", "method": "POST",
 				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContract,
 				"pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider", "providerCredentialDigest": fixtureCredentialDigest("Bearer smoke-access-token"),
 				"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience},
@@ -227,6 +285,8 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				t.Fatal(err)
 			}
 			request := httptest.NewRequest("POST", "/api/v2/http-capabilities/decide", bytes.NewReader(data))
+			// PDP transport JSON differs from the original Bee request's raw charset value.
+			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer smoke-access-token")
 			if mutate == "nonmember" {
 				request.Header.Set("Authorization", "Bearer smoke-nonmember-token")

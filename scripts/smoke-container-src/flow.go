@@ -37,8 +37,9 @@ type selection struct {
 const flowState = "/tmp/smoke-selection.json"
 
 type sharedSelectors struct{ organization, workspace string }
+type fixtureContentTypesKey struct{}
 
-func (f flow) request(method, path, body, token string, status int) ([]byte, error) {
+func (f flow) makeRequest(method, path, body, token string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(f.ctx, method, f.base+path, strings.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -53,6 +54,24 @@ func (f flow) request(method, path, body, token string, status int) ([]byte, err
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if values, ok := f.ctx.Value(fixtureContentTypesKey{}).([]string); ok {
+		req.Header.Del("Content-Type")
+		for _, value := range values {
+			req.Header.Add("Content-Type", value)
+		}
+	}
+	return req, nil
+}
+
+func (f flow) request(method, path, body, token string, status int) ([]byte, error) {
+	req, err := f.makeRequest(method, path, body, token)
+	if err != nil {
+		return nil, err
+	}
+	return f.sendRequest(req, status)
+}
+
+func (f flow) sendRequest(req *http.Request, status int) ([]byte, error) {
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -63,13 +82,13 @@ func (f flow) request(method, path, body, token string, status int) ([]byte, err
 		return nil, err
 	}
 	if len(data) > 1<<20 {
-		return nil, fmt.Errorf("%s %s: oversized response", method, path)
+		return nil, fmt.Errorf("%s %s: oversized response", req.Method, req.URL.Path)
 	}
 	if err := checkFixtureSecrets(data); err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != status {
-		return nil, fmt.Errorf("%s %s: status %d, want %d", method, path, resp.StatusCode, status)
+		return nil, fmt.Errorf("%s %s: status %d, want %d", req.Method, req.URL.Path, resp.StatusCode, status)
 	}
 	return data, nil
 }
@@ -408,12 +427,25 @@ func (f flow) policyStats() (fixturePolicyStats, error) {
 }
 
 func (f flow) sharedRequest(method, path, body, token, organization, workspace, mode string, status int) ([]byte, error) {
-	if _, err := f.control("/smoke/expect", fixtureExpectation{method, path, body, token, mode}); err != nil {
-		return nil, err
-	}
+	return f.sharedRequestContentTypes(method, path, body, token, organization, workspace, mode, nil, status)
+}
+
+func (f flow) sharedRequestContentTypes(method, path, body, token, organization, workspace, mode string, contentTypes []string, status int) ([]byte, error) {
 	local := f
 	local.ctx = context.WithValue(f.ctx, sharedSelectors{}, sharedSelectors{organization, workspace})
-	return local.request(method, path, body, token, status)
+	if contentTypes != nil {
+		local.ctx = context.WithValue(local.ctx, fixtureContentTypesKey{}, contentTypes)
+	}
+	req, err := local.makeRequest(method, path, body, token)
+	if err != nil {
+		return nil, err
+	}
+	// Capture the original Bee request before transport, not the PDP JSON POST.
+	expected := fixtureExpectation{Method: method, Path: path, Body: body, Token: token, Mode: mode, ContentTypes: req.Header.Values("Content-Type")}
+	if _, err := f.control("/smoke/expect", expected); err != nil {
+		return nil, err
+	}
+	return local.sendRequest(req, status)
 }
 
 type sharedSaved struct {
@@ -486,7 +518,7 @@ func (f flow) sharedFlow(phase string) error {
 		if s.ID == "" || s.Workspace != sharedWorkspace || s.State != "ready" {
 			return fmt.Errorf("shared selection lost server workspace ownership")
 		}
-		data, err = request("POST", "/v1/chat", chat(s, "shared-success", "shared workspace hello"), 200)
+		data, err = f.sharedRequestContentTypes("POST", "/v1/chat", chat(s, "shared-success", "shared workspace hello"), "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", []string{"application/json; charset=utf-8"}, 200)
 		if err != nil {
 			return err
 		}
@@ -499,6 +531,32 @@ func (f flow) sharedFlow(phase string) error {
 		saved.Models, saved.Deliveries = before.Models+1, before.Deliveries+1
 		if err := f.counts(saved.Models, saved.Deliveries); err != nil {
 			return err
+		}
+		for _, invalid := range []struct {
+			name   string
+			values []string
+		}{
+			{"missing", []string{}},
+			{"duplicate", []string{"application/json", "application/json"}},
+			{"invalid", []string{"text/plain"}},
+		} {
+			beforePolicy, err := f.policyStats()
+			if err != nil {
+				return err
+			}
+			if _, err := f.sharedRequestContentTypes("POST", "/v1/chat", chat(s, "bad-content-type-"+invalid.name, "must not dispatch"), "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", invalid.values, 403); err != nil {
+				return err
+			}
+			afterPolicy, err := f.policyStats()
+			if err != nil {
+				return err
+			}
+			if beforePolicy.Checks != afterPolicy.Checks {
+				return fmt.Errorf("%s Content-Type reached PDP instead of local refusal", invalid.name)
+			}
+			if err := f.counts(saved.Models, saved.Deliveries); err != nil {
+				return err
+			}
 		}
 		for _, test := range []struct {
 			name, token, organization, workspace, mode string

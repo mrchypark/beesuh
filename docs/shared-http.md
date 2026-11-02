@@ -42,9 +42,9 @@ The proposed action mapping is `run_execute`, `connection_select`,
 registered metadata, not capability IDs or catalog/contract pins. Use the fresh
 owner packet for actual capability IDs, versions and digests.
 
-The candidate Exposure/catalog forwarded-header contract contains exactly
-`x-organization-id` and `x-workspace-id`. Bee hashes these UTF-8 bytes, using the
-validated server binding, lowercase sorted names, no spaces, and a trailing LF:
+The owner-confirmed Exposure/catalog contract binds lowercase sorted forwarded
+header names with exact values and a trailing LF. GET and bodyless operations
+bind the two validated server selectors:
 
 ```text
 x-organization-id:operable
@@ -53,12 +53,36 @@ x-workspace-id:cypark-default
 
 SHA-256 for that exact preimage is
 `sha256:818f1c996cee0ceea1860229107f8d7ccc367853d0e5c6d822962790a9705363`.
-Authorization is excluded from this header digest and remains bound separately
-by the original credential digest. Catalog forwarded headers must include both
-selectors. Content-Type forwarding remains an owner contract question: the
-owner's example includes `content-type` as a third forwarded header, while the
-two-selector candidate above awaits confirmation that POST Content-Type is
-preserved. Do not change the digest or claim compatibility until that is settled.
+Chat and connection-selection POSTs bind three lines instead:
+
+```text
+content-type:application/json
+x-organization-id:operable
+x-workspace-id:cypark-default
+```
+
+For exactly `application/json`, that POST digest is
+`sha256:084be18acf9b8af74f91e5eaff09e93a9eebccde8f4f94393234cef2da7cc985`.
+If Content-Type has parameters, the complete actual value is hashed unchanged,
+including its case, spacing and parameters; it is not MIME-reserialized. Bee
+requires one safe Content-Type header whose parsed media type is
+`application/json`. Missing, duplicate, malformed or non-JSON Content-Type
+denies before Grant, key delivery or model dispatch. Authorization is excluded
+from both header preimages and bound separately by the credential digest.
+
+Owner source `20683606` requires `content-type` in POST `request.forwardHeaders`
+when `request.contentTypes` declares `application/json`; it is not automatically
+forwarded. Such POST capabilities must forward/bind all three headers, while
+GET/bodyless capabilities use just the two selectors. No HTTP transport
+workaround or automatic Content-Type insertion is added.
+
+The owner-confirmed POST catalog `maxBytes` is `262144` (256 KiB), matching
+Bee's existing `sharedBodyLimit`. `65536` was only an example, not an official
+ceiling. Exposure's global `MAX_REQUEST_BYTES` must be at least `262144`; its
+supplied default is 4 MiB. No smaller Bee limit or additional validation is
+introduced. Forward Content-Type's raw value, including parameters, and bind it
+as the first of the three POST header lines; GET/bodyless operations retain only
+the two selector lines.
 
 Exposure owner source `20683606` confirms only `pathSegment`, `queryScalar`,
 `constant` and `jsonPointer` resource extractors; there is no header extractor.
@@ -239,6 +263,13 @@ workspace must match the selected server workspace. Status and Compos routes
 are not shared operations. Unknown query keys, duplicate selectors/queries,
 encoded path variants and unsupported operations fail closed.
 
+For example, run lookup is
+`GET /v1/runs/request-1?workspace_id=cypark-default`, and history is
+`GET /v1/history?workspace_id=cypark-default&session_key=chat-1`. Use the actual
+`workspace_id` query spelling; an owner example's `workspaceId` placeholder is
+not a supported Bee query key. Chat and selection POSTs additionally require
+`Content-Type: application/json` (valid parameters are preserved and bound).
+
 1. List `/v1/connection-options`; this returns safe owner connection metadata,
    not approval or model keys.
 2. Use Goauthy's existing browser handoff and consent flow. The host UI/BFF
@@ -315,8 +346,8 @@ test, build, image publication or live model call was run for this transplant.
 To exercise the real flow, owners still need to supply the actual catalog and
 capability pins, learner/resource registration, app-key provisioning and
 credential-hint audience; confirm actual token issuance for the supplied
-issuer/client/API/resource audiences and required scopes; settle Content-Type
-forwarding against the two-selector candidate; and supply the approved Goauthy
+issuer/client/API/resource audiences and required scopes; supply catalog pins
+matching the confirmed POST-three-header/GET-two-header contract; and supply the approved Goauthy
 provider/connector/delivery grant for the configured model endpoint. The owner
 has confirmed original-human-Bearer forwarding as the source contract; its live
 deployment has not been verified here.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -146,7 +147,11 @@ func singleSharedHeader(h http.Header, name string) (string, bool) {
 	if strings.EqualFold(name, "Authorization") {
 		limit = 16384 + len("Bearer ")
 	}
-	if len(values) != 1 || values[0] == "" || len(values[0]) > limit || strings.ContainsAny(values[0], "\r\n\x00,") || !utf8.ValidString(values[0]) || strings.TrimSpace(values[0]) != values[0] {
+	forbidden := "\r\n\x00,"
+	if strings.EqualFold(name, "Content-Type") {
+		forbidden = "\r\n\x00"
+	}
+	if len(values) != 1 || values[0] == "" || len(values[0]) > limit || strings.ContainsAny(values[0], forbidden) || !utf8.ValidString(values[0]) || strings.TrimSpace(values[0]) != values[0] {
 		return "", false
 	}
 	return values[0], true
@@ -202,6 +207,16 @@ func sharedSnapshot(r *http.Request, organization, workspace string) (string, gr
 	if !ok {
 		return denied()
 	}
+	headers := "x-organization-id:" + organization + "\nx-workspace-id:" + workspace + "\n"
+	if operation == "run_execute" || operation == "connection_select" {
+		contentType, ok := singleSharedHeader(r.Header, "Content-Type")
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if !ok || err != nil || mediaType != "application/json" {
+			return denied()
+		}
+		// Bind the original value, including parameters, rather than MIME reserialization.
+		headers = "content-type:" + contentType + "\n" + headers
+	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		return denied()
@@ -248,8 +263,6 @@ func sharedSnapshot(r *http.Request, organization, workspace string) (string, gr
 		}
 	}
 	canonicalQuery := strings.ReplaceAll(query.Encode(), "+", "%20")
-	// Bind only the validated server selectors, never Authorization or raw headers.
-	headers := "x-organization-id:" + organization + "\nx-workspace-id:" + workspace + "\n"
 	return operation, grantpolicy.ActualSnapshot{Method: r.Method, CanonicalPath: r.URL.Path, CanonicalQuery: canonicalQuery, ForwardedHeaderDigest: grantpolicy.Digest([]byte(headers)), BodyDigest: grantpolicy.Digest(body), BodyLength: int64(len(body))}, nil
 }
 

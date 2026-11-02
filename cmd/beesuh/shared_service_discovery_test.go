@@ -108,6 +108,15 @@ func TestSharedServiceDiscoveryKeepsModelConsentAndWorkspaceOwnership(t *testing
 		return out
 	}
 	selection := `{"collection_id":"models","connection_id":"mine","grant_id":"approved"}`
+	for _, path := range []string{"/v1/chat", "/v1/connections"} {
+		req := sharedTestRequest("POST", path, `{"workspace_id":"work-a"}`, "work-a")
+		req.Header.Del("Content-Type")
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, req)
+		if out.Code != 403 || len(check.calls) != 0 || metadata.Load() != 0 || deliveries.Load() != 0 || dispatches.Load() != 0 {
+			t.Fatalf("missing Content-Type reached policy, Goauthy or model: %s status=%d", path, out.Code)
+		}
+	}
 	var connections []beesuh.Connection
 	for _, workspace := range []string{"work-a", "work-b"} {
 		out := request("POST", "/v1/connections", selection, workspace)

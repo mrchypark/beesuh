@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -184,9 +185,19 @@ func fixtureCredentialDigest(authorization string) string {
 	return fixtureDigest(append(data, []byte(authorization)...))
 }
 
-func fixtureHeaderDigest() string {
-	// Candidate two-selector preimage; Content-Type forward-list confirmation is pending.
-	return fixtureDigest([]byte("x-organization-id:" + sharedOrganization + "\nx-workspace-id:" + sharedWorkspace + "\n"))
+func fixtureHeaderDigest(operation string, contentTypes []string) (string, bool) {
+	preimage := ""
+	if operation == "run_execute" || operation == "connection_select" {
+		if len(contentTypes) != 1 {
+			return "", false
+		}
+		mediaType, _, err := mime.ParseMediaType(contentTypes[0])
+		if err != nil || mediaType != "application/json" {
+			return "", false
+		}
+		preimage = "content-type:" + contentTypes[0] + "\n"
+	}
+	return fixtureDigest([]byte(preimage + "x-organization-id:" + sharedOrganization + "\nx-workspace-id:" + sharedWorkspace + "\n")), true
 }
 
 func fixtureAction(operation string) string {
@@ -234,11 +245,12 @@ func sharedFixtureConfig(base []byte, partial bool) ([]byte, error) {
 }
 
 type fixtureExpectation struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Body   string `json:"body"`
-	Token  string `json:"token"`
-	Mode   string `json:"mode"`
+	Method       string   `json:"method"`
+	Path         string   `json:"path"`
+	Body         string   `json:"body"`
+	Token        string   `json:"token"`
+	Mode         string   `json:"mode"`
+	ContentTypes []string `json:"contentTypes"`
 }
 
 type fixturePolicyStats struct {
@@ -322,9 +334,10 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	query := strings.ReplaceAll(u.Query().Encode(), "+", "%20")
 	credential := "Bearer " + expected.Token
+	headerDigest, validContentType := fixtureHeaderDigest(operation, expected.ContentTypes)
 	values := map[string]any{
 		"bodyDigest": fixtureDigest([]byte(expected.Body)), "bodyLength": len(expected.Body), "canonicalPath": u.Path,
-		"canonicalQuery": query, "canonicalQueryDigest": fixtureDigest([]byte(query)), "forwardedHeaderDigest": fixtureHeaderDigest(),
+		"canonicalQuery": query, "canonicalQueryDigest": fixtureDigest([]byte(query)), "forwardedHeaderDigest": headerDigest,
 		"capabilityId": "bee." + operation, "capabilityVersion": 1, "catalogDigest": fixtureCatalog, "catalogGeneration": 1,
 		"contractDigest": fixtureContract, "method": expected.Method, "pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider",
 		"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience}, "providerCredentialDigest": fixtureCredentialDigest(credential),
@@ -333,7 +346,7 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if expected.Token == "smoke-nonmember-token" {
 		values["providerCredential"] = map[string]string{"subject": "nonmember-user", "audience": grantHintAudience}
 	}
-	valid := operation != "" && r.Method == "POST" && r.URL.Path == "/api/v2/http-capabilities/decide" && r.Header.Get("Authorization") == credential && r.Header.Get("X-Organization-ID") == sharedOrganization && r.Header.Get("X-Grant-App-Auth-Key") == fixtureAppKey && len(request) == len(values)+1
+	valid := validContentType && operation != "" && r.Method == "POST" && r.URL.Path == "/api/v2/http-capabilities/decide" && r.Header.Get("Authorization") == credential && r.Header.Get("X-Organization-ID") == sharedOrganization && r.Header.Get("X-Grant-App-Auth-Key") == fixtureAppKey && len(request) == len(values)+1
 	for name, value := range values {
 		var actual any
 		encoded, _ := json.Marshal(value)

@@ -112,6 +112,9 @@ func sharedTestRequest(method, path, body, workspace string) *http.Request {
 	req.Header.Set("Authorization", "Bearer opaque-human-token")
 	req.Header.Set("X-Organization-ID", "org")
 	req.Header.Set("X-Workspace-ID", workspace)
+	if method == "POST" && (path == "/v1/chat" || path == "/v1/connections") {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return req
 }
 
@@ -176,7 +179,7 @@ func TestSharedServiceSnapshotIsImmutableAndRechecks(t *testing.T) {
 		t.Fatal("body not restored")
 	}
 	initial := check.calls[0]
-	if initial.actual.ForwardedHeaderDigest != "sha256:3f9bb0d2090e3ecf1e133c2beebd28d61ec804f9285fba90b40bc0974ab88d16" {
+	if initial.actual.ForwardedHeaderDigest != "sha256:787da76e548aa96cf8897406353227899e0d1d455289cd6a313002c995ef8f57" {
 		t.Fatalf("snapshot did not bind exact selector header bytes: %s", initial.actual.ForwardedHeaderDigest)
 	}
 	if initial.actual.BodyDigest != grantpolicy.Digest([]byte(body)) || initial.actual.BodyLength != int64(len(body)) || initial.credential.Subject != "user" || initial.credential.Audience != s.shared.hintAudience || initial.credential.Authorization != "Bearer opaque-human-token" {
@@ -186,6 +189,7 @@ func TestSharedServiceSnapshotIsImmutableAndRechecks(t *testing.T) {
 	req.URL.Path = "/v1/connections/foreign"
 	req.URL.RawQuery = "workspace_id=foreign"
 	req.Header.Set("X-Workspace-ID", "foreign")
+	req.Header.Set("Content-Type", "text/plain")
 	req.Body = io.NopCloser(strings.NewReader("changed"))
 	ctx := context.WithoutCancel(req.Context())
 	if err := s.authorize(ctx, p); err != nil {
@@ -220,6 +224,7 @@ func TestSharedSnapshotSelectorHeaderDigest(t *testing.T) {
 	req.Header.Set("X-Organization-ID", "raw-selector-is-not-the-binding")
 	req.Header.Set("X-Workspace-ID", "raw-selector-is-not-the-binding")
 	req.Header.Set("X-Unrelated", "excluded")
+	req.Header.Set("Content-Type", "text/plain")
 	_, same, err := sharedSnapshot(req, "operable", "cypark-default")
 	if err != nil || same.ForwardedHeaderDigest != base.ForwardedHeaderDigest {
 		t.Fatal("raw request headers or Authorization changed the server-binding digest")
@@ -228,6 +233,59 @@ func TestSharedSnapshotSelectorHeaderDigest(t *testing.T) {
 		_, changed, err := sharedSnapshot(req, binding[0], binding[1])
 		if err != nil || changed.ForwardedHeaderDigest == base.ForwardedHeaderDigest {
 			t.Fatalf("server selector change was not bound: %v %v", binding, err)
+		}
+	}
+}
+
+func TestSharedSnapshotBindsExactJSONContentType(t *testing.T) {
+	for _, route := range []struct{ path, body string }{
+		{"/v1/chat", `{"workspace_id":"work-a","message":"hi"}`},
+		{"/v1/connections", `{"collection_id":"models","connection_id":"mine","grant_id":"approved"}`},
+	} {
+		for _, tc := range []struct{ value, digest string }{
+			{"application/json", "sha256:787da76e548aa96cf8897406353227899e0d1d455289cd6a313002c995ef8f57"},
+			{"application/json; charset=utf-8", "sha256:6d4fc4f94e118fd7787962b7780b0295babdf856d2419b0b31e36c91ca2ec937"},
+		} {
+			req := sharedTestRequest("POST", route.path, route.body, "work-a")
+			req.Header.Set("Content-Type", tc.value)
+			_, actual, err := sharedSnapshot(req, "org", "work-a")
+			if err != nil || actual.ForwardedHeaderDigest != tc.digest {
+				t.Fatalf("%s Content-Type %q: %s %v", route.path, tc.value, actual.ForwardedHeaderDigest, err)
+			}
+		}
+		req := sharedTestRequest("POST", route.path, route.body, "work-a")
+		value := `Application/JSON; profile="a,b"`
+		req.Header.Set("Content-Type", value)
+		_, actual, err := sharedSnapshot(req, "org", "work-a")
+		sum := sha256.Sum256([]byte("content-type:" + value + "\nx-organization-id:org\nx-workspace-id:work-a\n"))
+		if err != nil || actual.ForwardedHeaderDigest != "sha256:"+hex.EncodeToString(sum[:]) {
+			t.Fatalf("exact mixed-case/quoted parameter value was not retained: %s %v", actual.ForwardedHeaderDigest, err)
+		}
+	}
+}
+
+func TestSharedServiceRejectsUnsafeContentTypeBeforePolicy(t *testing.T) {
+	for _, path := range []string{"/v1/chat", "/v1/connections"} {
+		for _, headers := range []http.Header{
+			{},
+			{"Content-Type": {""}},
+			{"Content-Type": {"application/json", "application/json"}},
+			{"Content-Type": {"application/json"}, "content-type": {"application/json"}},
+			{"Content-Type": {"application/json, application/json"}},
+			{"Content-Type": {"text/plain"}},
+			{"Content-Type": {"application/json; charset"}},
+			{"Content-Type": {"application/json\r\nx-injected: yes"}},
+			{"Content-Type": {"application/json\x00"}},
+		} {
+			s, check, _, _ := sharedOAuthService(t)
+			req := sharedTestRequest("POST", path, `{"workspace_id":"work-a"}`, "work-a")
+			req.Header.Del("Content-Type")
+			for key, values := range headers {
+				req.Header[key] = values
+			}
+			if _, err := s.authenticate(req); !errors.Is(err, beesuh.ErrForbidden) || len(check.calls) != 0 {
+				t.Fatalf("unsafe Content-Type reached policy on %s: %v checks=%d", path, err, len(check.calls))
+			}
 		}
 	}
 }

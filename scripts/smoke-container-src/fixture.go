@@ -37,6 +37,8 @@ func personalFixture(auth http.Handler) http.Handler {
 	var deliveries, models, violations atomic.Int64
 	var active atomic.Bool
 	var revoked atomic.Bool
+	// Consent is one stable record; reads must not manufacture a new revision.
+	expires := time.Now().Add(time.Hour).UnixMilli()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
 		if err != nil || len(body) > 1<<20 {
@@ -128,7 +130,6 @@ func personalFixture(auth http.Handler) http.Handler {
 			return
 		}
 		connection := map[string]any{"id": "personal", "collection_id": "models", "owner_subject": "smoke-user", "state": "ready"}
-		expires := time.Now().Add(time.Hour).UnixMilli()
 		switch r.URL.Path {
 		case "/auth/v1/connection-collections":
 			_ = json.NewEncoder(w).Encode([]any{map[string]any{"id": "models", "enabled": true, "auth_method": "api_key", "provider_ids": []string{"smoke-provider"}}})

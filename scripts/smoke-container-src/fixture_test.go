@@ -71,6 +71,43 @@ func TestPersonalFixtureCredentialBoundaries(t *testing.T) {
 	}
 }
 
+func TestGrantFixtureSnapshotStableUntilRevocation(t *testing.T) {
+	handler := fixtureHandler()
+	read := func() []byte {
+		t.Helper()
+		request := httptest.NewRequest("GET", "/auth/v1/connections/models/personal/grants/approved", nil)
+		request.Header.Set("Authorization", "Bearer smoke-access-token")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 200 {
+			t.Fatalf("grant metadata status=%d", response.Code)
+		}
+		return response.Body.Bytes()
+	}
+	first := read()
+	// Cross the fixture's millisecond timestamp precision before the second read.
+	time.Sleep(5 * time.Millisecond)
+	if !bytes.Equal(first, read()) {
+		t.Fatal("unchanged consent metadata changed between reads; Bee must reject that snapshot before key delivery")
+	}
+	request := httptest.NewRequest("POST", "/smoke/consent", strings.NewReader(`{"revoked":true}`))
+	request.Header.Set("Authorization", "Bearer "+fixtureControl)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatal("fixture revocation failed")
+	}
+	var before, after struct {
+		Grant struct {
+			Expires int64 `json:"expires_at_unix_ms"`
+			Revoked bool  `json:"revoked"`
+		} `json:"grant"`
+	}
+	if json.Unmarshal(first, &before) != nil || json.Unmarshal(read(), &after) != nil || before.Grant.Expires == 0 || before.Grant.Expires != after.Grant.Expires || before.Grant.Revoked || !after.Grant.Revoked {
+		t.Fatal("revocation must change authority explicitly without changing the recorded expiry")
+	}
+}
+
 func TestBlockingModelStopsOnClientCancellation(t *testing.T) {
 	server := httptest.NewServer(fixtureHandler())
 	defer server.Close()

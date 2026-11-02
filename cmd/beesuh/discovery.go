@@ -181,6 +181,15 @@ func (s *serviceConfig) checkedGrant(ctx context.Context, ref discoveryRef) (dis
 	return status, claims, nil
 }
 func (s *serviceConfig) resolveDiscovered(ctx context.Context, c beesuh.Connection) (beesuh.Credential, error) {
+	if len(s.Shared) != 0 {
+		snapshot, ok := ctx.Value(sharedRequestKey{}).(sharedRequest)
+		if !ok || snapshot.owner != s || c.OrganizationID != snapshot.principal.OrganizationID || c.UserID != snapshot.principal.UserID || c.WorkspaceID != snapshot.principal.WorkspaceID {
+			return beesuh.Credential{}, auth.ErrForbidden
+		}
+		if e := s.authorize(ctx, snapshot.principal); e != nil {
+			return beesuh.Credential{}, e
+		}
+	}
 	ref, e := decodeDiscoveryRef(c.CredentialRef)
 	if e != nil {
 		return beesuh.Credential{}, e
@@ -189,8 +198,11 @@ func (s *serviceConfig) resolveDiscovered(ctx context.Context, c beesuh.Connecti
 	if e != nil {
 		return beesuh.Credential{}, e
 	}
-	p := beesuh.Principal{UserID: serviceUserID(s.Issuer, claims.Subject), WorkspaceID: serviceUserID(s.Issuer, claims.Subject)}
-	if c.Kind != "provider" || c.UserID != p.UserID || c.WorkspaceID != p.WorkspaceID || c.TargetID != s.Goauthy.Providers[status.Grant.Provider] || c.ID != discoveredID(p, c.CredentialRef) {
+	p, e := s.discoveryPrincipal(ctx, claims.Subject)
+	if e != nil {
+		return beesuh.Credential{}, e
+	}
+	if c.Kind != "provider" || c.OrganizationID != p.OrganizationID || c.UserID != p.UserID || c.WorkspaceID != p.WorkspaceID || c.TargetID != s.Goauthy.Providers[status.Grant.Provider] || c.ID != discoveredID(p, c.CredentialRef) {
 		return beesuh.Credential{}, auth.ErrForbidden
 	}
 	if e = s.authorize(ctx, p); e != nil {
@@ -257,7 +269,11 @@ func (discoveryUnavailableTransport) RoundTrip(r *http.Request) (*http.Response,
 	return nil, auth.ErrUnavailable
 }
 func discoveredID(p beesuh.Principal, ref string) string {
-	b, _ := json.Marshal([]string{p.UserID, p.WorkspaceID, ref})
+	identity := []string{p.UserID, p.WorkspaceID, ref}
+	if p.OrganizationID != "" {
+		identity = []string{p.OrganizationID, p.UserID, p.WorkspaceID, ref}
+	}
+	b, _ := json.Marshal(identity)
 	h := sha256.Sum256(b)
 	return "ga_" + hex.EncodeToString(h[:])
 }
@@ -339,6 +355,12 @@ func (s *serviceConfig) discoveryHandler(runtime *beesuh.Runtime, next http.Hand
 					}
 				}
 			}
+			if len(s.Shared) != 0 {
+				if e := s.authorize(r.Context(), p); e != nil {
+					fail(e)
+					return
+				}
+			}
 			write(http.StatusOK, options)
 			return
 		}
@@ -356,7 +378,13 @@ func (s *serviceConfig) discoveryHandler(runtime *beesuh.Runtime, next http.Hand
 			fail(auth.ErrForbidden)
 			return
 		}
-		c := beesuh.Connection{ID: discoveredID(p, ref.encoded()), UserID: p.UserID, WorkspaceID: p.WorkspaceID, Kind: "provider", TargetID: s.Goauthy.Providers[status.Grant.Provider], CredentialRef: ref.encoded(), State: "ready"}
+		if len(s.Shared) != 0 {
+			if e := s.authorize(r.Context(), p); e != nil {
+				fail(e)
+				return
+			}
+		}
+		c := beesuh.Connection{ID: discoveredID(p, ref.encoded()), OrganizationID: p.OrganizationID, UserID: p.UserID, WorkspaceID: p.WorkspaceID, Kind: "provider", TargetID: s.Goauthy.Providers[status.Grant.Provider], CredentialRef: ref.encoded(), State: "ready"}
 		if e = runtime.RegisterConnection(r.Context(), c); e != nil {
 			fail(e)
 			return

@@ -30,8 +30,10 @@ type serviceConfig struct {
 	Audience         string            `json:"audience"`
 	RequiredScopes   []string          `json:"required_scopes"`
 	Goauthy          *serviceDiscovery `json:"goauthy"`
+	Shared           json.RawMessage   `json:"shared,omitempty"`
 	client           *http.Client
 	providerClient   *http.Client
+	shared           *sharedService
 }
 
 func serviceUserID(issuer, subject string) string {
@@ -61,6 +63,9 @@ func loadService(filename string) (*serviceConfig, error) {
 		return nil, errors.New("invalid Goauthy discovery configuration")
 	}
 	s.client = &http.Client{Timeout: 10 * time.Second, CheckRedirect: noServiceRedirect}
+	if e := s.configureShared(); e != nil {
+		return nil, e
+	}
 	return &s, nil
 }
 
@@ -254,40 +259,51 @@ func (s *serviceConfig) authenticate(r *http.Request) (beesuh.Principal, error) 
 		return beesuh.Principal{}, e
 	}
 	*r = *r.WithContext(context.WithValue(r.Context(), serviceAccessKey{}, parts[1]))
+	if len(s.Shared) != 0 {
+		return s.authenticateShared(r, p)
+	}
 	return p, nil
 }
 func (s *serviceConfig) verify(ctx context.Context, token string) (beesuh.Principal, error) {
+	p, _, e := s.verifyHuman(ctx, token)
+	return p, e
+}
+
+func (s *serviceConfig) verifyHuman(ctx context.Context, token string) (beesuh.Principal, serviceClaims, error) {
 	c, e := s.inspect(ctx, token, s.Audience, s.RequiredScopes)
 	if e != nil {
-		return beesuh.Principal{}, e
+		return beesuh.Principal{}, c, e
 	}
 	// Introspection hints and Bearer usage do not prove access-token type.
 	// UserInfo must validate an access token, never a refresh token.
 	if s.UserInfoURL == "" {
-		return beesuh.Principal{}, beesuh.ErrUnauthenticated
+		return beesuh.Principal{}, c, beesuh.ErrUnauthenticated
 	}
 	if s.UserInfoURL != "" {
 		if !hasScopes(c.Scope, []string{"openid"}) {
-			return beesuh.Principal{}, beesuh.ErrUnauthenticated
+			return beesuh.Principal{}, c, beesuh.ErrUnauthenticated
 		}
 		var info struct {
 			Subject string `json:"sub"`
 		}
 		if e := s.oauth(ctx, s.UserInfoURL, nil, token, &info); e != nil {
-			return beesuh.Principal{}, e
+			return beesuh.Principal{}, c, e
 		}
 		if info.Subject != c.Subject {
-			return beesuh.Principal{}, beesuh.ErrUnauthenticated
+			return beesuh.Principal{}, c, beesuh.ErrUnauthenticated
 		}
 	}
 	id := serviceUserID(s.Issuer, c.Subject)
-	return beesuh.Principal{UserID: id, WorkspaceID: id}, nil
+	return beesuh.Principal{UserID: id, WorkspaceID: id}, c, nil
 }
 func (s *serviceConfig) authorize(ctx context.Context, p beesuh.Principal) error {
 	token, _ := ctx.Value(serviceAccessKey{}).(string)
-	verified, e := s.verify(ctx, token)
+	verified, claims, e := s.verifyHuman(ctx, token)
 	if e != nil {
 		return e
+	}
+	if len(s.Shared) != 0 {
+		return s.authorizeShared(ctx, p, verified, claims)
 	}
 	if verified != p {
 		return beesuh.ErrForbidden
@@ -295,6 +311,9 @@ func (s *serviceConfig) authorize(ctx context.Context, p beesuh.Principal) error
 	return nil
 }
 func (s *serviceConfig) configure(o *beesuh.Options) error {
+	if err := s.configureShared(); err != nil {
+		return err
+	}
 	if o.Native == nil || o.Native.Conductor != nil || len(o.Native.Conductors) != 0 {
 		return errors.New("service mode requires native providers without operator Conductor configuration")
 	}

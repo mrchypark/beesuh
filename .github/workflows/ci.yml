@@ -99,7 +99,18 @@ jobs:
           cache-from: type=gha,scope=beesuh-build
           cache-to: type=gha,mode=max,scope=beesuh-build
       - name: Container smoke test
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: sh scripts/smoke-container.sh beesuh:smoke
+      - name: Preserve failed smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-smoke-logs
+          path: |
+            ${{ runner.temp }}/beesuh-smoke.*/*.log
+            ${{ runner.temp }}/beesuh-smoke.*/logs/*.log
+          if-no-files-found: ignore
 
   docker-publish:
     needs: [release-ref, go, opencode-plugin, docker-check]
@@ -119,6 +130,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        id: publish
         with:
           context: .
           push: true
@@ -127,3 +139,27 @@ jobs:
           labels: org.opencontainers.image.source=https://github.com/mrchypark/beesuh
           cache-from: type=gha,scope=beesuh-build
           cache-to: type=gha,mode=max,scope=beesuh-build
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify the published image by digest
+        env:
+          PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}
+          TMPDIR: ${{ runner.temp }}
+        shell: sh
+        run: |
+          set -eu
+          test "${#PUBLISHED_DIGEST}" -eq 71
+          printf '%s\n' "$PUBLISHED_DIGEST" | LC_ALL=C grep -Eq '^sha256:[0-9a-f]{64}$'
+          image="ghcr.io/mrchypark/beesuh@$PUBLISHED_DIGEST"
+          docker pull --platform linux/amd64 "$image"
+          sh scripts/smoke-container.sh "$image"
+      - name: Preserve failed published-image smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-image-smoke-logs
+          path: |
+            ${{ runner.temp }}/beesuh-smoke.*/*.log
+            ${{ runner.temp }}/beesuh-smoke.*/logs/*.log
+          if-no-files-found: ignore

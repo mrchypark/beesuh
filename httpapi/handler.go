@@ -104,6 +104,7 @@ func newHandler(h handler) http.Handler {
 	mux.HandleFunc("GET /v1/providers", h.providers)
 	mux.HandleFunc("GET /v1/history", h.history)
 	mux.HandleFunc("GET /v1/runs/{request_id}", h.run)
+	mux.HandleFunc("POST /v1/runs/{request_id}/cancel", h.cancelRun)
 	mux.HandleFunc("GET /v1/connections", h.connections)
 	mux.HandleFunc("DELETE /v1/connections/{connection_id}", h.revokeConnection)
 	return responseWriteDeadline(h.authenticated(mux), responseWriteTimeout)

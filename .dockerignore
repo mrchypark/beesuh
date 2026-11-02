@@ -15,6 +15,8 @@
 !conductor/*.go
 !goauthy/
 !goauthy/*.go
+!grantpolicy/
+!grantpolicy/*.go
 !httpapi/
 !httpapi/*.go
 !model/

@@ -41,7 +41,7 @@ func TestRhizaQueryCancellationKeepsHTTPCategory(t *testing.T) {
 	}
 	healthy(t)
 	invalid := query(t.Context(), "SELECT FROM")
-	if invalid == nil || errors.Is(invalid, context.DeadlineExceeded) || errors.Is(invalid, context.Canceled) {
+	if invalid == nil || errors.Is(invalid, context.DeadlineExceeded) || errors.Is(invalid, context.Canceled) || errors.Is(invalid, sqlite3.INTERRUPT) {
 		t.Fatalf("invalid SQL misclassified: %v", invalid)
 	}
 	healthy(t)
@@ -61,11 +61,16 @@ func TestRhizaQueryCancellationKeepsHTTPCategory(t *testing.T) {
 			}
 			defer cancel()
 			err := query(ctx, `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n`)
-			if !errors.Is(ctx.Err(), want) || !errors.Is(err, want) {
+			if !errors.Is(ctx.Err(), want) {
+				t.Fatalf("Query did not reach requested cancellation: ctx=%v error=%v want=%v", ctx.Err(), err, want)
+			}
+			if !errors.Is(err, want) {
+				if !errors.Is(err, rhiza.ErrInvalidRequest) {
+					t.Fatalf("Query returned unexpected SQL boundary error: ctx=%v error=%v want=%v", ctx.Err(), err, want)
+				}
 				t.Fatalf("Query lost context cause: ctx=%v error=%v want=%v", ctx.Err(), err, want)
 			}
-			var driverErr *sqlite3.Error
-			if !errors.As(err, &driverErr) || driverErr.Code() != sqlite3.INTERRUPT {
+			if !errors.Is(err, sqlite3.INTERRUPT) {
 				t.Fatalf("Query did not preserve a driver INTERRUPT: %v", err)
 			}
 			out := httptest.NewRecorder()

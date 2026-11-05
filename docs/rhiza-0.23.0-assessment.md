@@ -10,7 +10,7 @@ Assessed 2026-11-06 against Beesuh main `99a73f3681bae3364521cd4345cfcc464695858
 - go.mod checksum: `h1:Cmof+NGVUgCu4+HTenSu2h5SKW88w5KxBV1S9eJNevM=`.
 - Proxy ZIP SHA256: `5d8fff87174fe688b3db207c659583a301a062c623c4d3c46a186dfe9f61e19f` (archive hash, distinct from Go's module checksum).
 
-The independently completed gate verified module checksums against sumdb. Retained local evidence is `/tmp/beesuh-rhiza023-gate.iyiFQJet`: release/tag/proxy metadata, source ZIP, sumdb record, complete 4,908-member `zip-batch-preimage`, and `mod-dirhash-preimage`. The complete ZIP preimage and mod preimage reproduce the two checksums above; shorter exploratory preimages are not acceptance evidence. No required artifact is missing or mismatched; no redelivery is needed.
+The independently completed gate checked release/tag/proxy metadata, the source ZIP, and sumdb. The complete 4,908-member ZIP dirhash preimage and go.mod preimage reproduced the two checksums above; shorter exploratory preimages were not acceptance evidence. The official URLs below provide durable artifact references without depending on temporary local evidence. No required artifact is missing or mismatched; no redelivery is needed.
 
 Beesuh consumes Go source and its transitive modules for a `CGO_ENABLED=0` linux/amd64 Docker build and darwin/arm64 cross-build. Rhiza's go.mod is byte-identical to v0.22.0, so no additional module requirements are introduced. Rust crates, native FFI archives, and operator images are not required by this consumer path.
 
@@ -26,7 +26,11 @@ Beesuh opens a loopback single-node peer (`Local` remains false), not managed HA
 
 ## Candidate verification and limits
 
+The [first candidate CI run, 42120769680](https://github.com/mrchypark/beesuh/actions/runs/42120769680), at head `7a293c6`, failed only the new test's concrete `*sqlite3.Error` assumption; its context-identity assertions and Docker smoke passed. Independent inspection of the pinned go-sqlite3 v0.35.3 public API confirmed that an `ExtendedErrorCode` is also a valid driver error. The corrected test uses `errors.Is(err, sqlite3.INTERRUPT)` while retaining the driver check and invalid-SQL negative case. This is a test-oracle correction, not evidence of a v0.23.0 runtime failure. No subsequent candidate result is recorded here.
+
 Remote candidate CI must establish:
+
+The baseline negative control establishes a completed context and a public Query `ErrInvalidRequest` that lost the context sentinel, not the exact SQL VM start time; the candidate checks context identity, public `errors.Is(err, sqlite3.INTERRUPT)`, and HTTP controls.
 
 - Real interrupted Query errors preserve context and driver identity, reach Beesuh's HTTP 504 mapping, and leave subsequent queries healthy; invalid SQL remains an ordinary error.
 - Transaction rollback and expected-row rejection remain atomic; ambiguous mutation outcomes retain the existing uncertainty handling without automatic resubmission.

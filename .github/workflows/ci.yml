@@ -86,6 +86,16 @@ jobs:
           printf 'Rhiza seed=%s verify=%s\n' "$baseline" "$candidate"
           test "$baseline" = v0.22.0
           test "$candidate" = v0.23.0
+          baseline_status=0
+          go test -mod=readonly -modfile="$work/baseline.mod" -count=1 -timeout 120s -v \
+            -run '^TestRhizaQueryCancellationKeepsHTTPCategory$' ./httpapi \
+            >"$work/baseline-query.log" 2>&1 || baseline_status=$?
+          cat "$work/baseline-query.log"
+          test "$baseline_status" -eq 1
+          for mode in deadline cancel; do
+            grep -F -- "--- FAIL: TestRhizaQueryCancellationKeepsHTTPCategory/$mode (" "$work/baseline-query.log"
+          done
+          test "$(grep -c 'Query lost context cause:' "$work/baseline-query.log")" -eq 2
           go test -mod=readonly -modfile="$work/baseline.mod" -c -o "$work/seed.test" .
           BEESUH_RECOVERY_SEED_BINARY="$work/seed.test" go test -mod=readonly -count=1 -timeout 120s -v -run '^TestSingleNodeDurableRecovery$' .
 

@@ -41,10 +41,11 @@ type sharedContextConfig struct {
 }
 
 type sharedCapabilityPin struct {
-	CapabilityID      string `json:"capability_id"`
-	CapabilityVersion int64  `json:"capability_version"`
-	ContractDigest    string `json:"contract_digest"`
-	ActionID          string `json:"action_id"`
+	CapabilityID      string          `json:"capability_id"`
+	CapabilityVersion int64           `json:"capability_version"`
+	ContractDigest    string          `json:"contract_digest"`
+	ActionID          string          `json:"action_id"`
+	ForwardHeaders    json.RawMessage `json:"forward_headers,omitempty"`
 }
 
 type sharedBindingKey struct{ organization, workspace string }
@@ -59,7 +60,34 @@ type sharedContext struct {
 	organization, workspace string
 	policy                  sharedPolicyChecker
 	operations              map[string]grantpolicy.Binding
+	forwardHeaders          map[string][]string
 }
+
+func sharedForwardHeaders(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	var names []string
+	if json.Unmarshal(raw, &names) != nil || names == nil {
+		return nil, false
+	}
+	for i, name := range names {
+		if name == "" || (i > 0 && names[i-1] >= name) {
+			return nil, false
+		}
+		for _, c := range name {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return nil, false
+			}
+		}
+		switch name {
+		case "authorization", "proxy-authorization", "proxy-authenticate", "cookie", "set-cookie", "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length":
+			return nil, false
+		}
+	}
+	return names, true
+}
+
 type sharedRequestKey struct{}
 
 // No mutable request, body buffer, raw selectors, or cached decision is retained.
@@ -115,11 +143,17 @@ func (s *serviceConfig) configureShared() error {
 			return bad()
 		}
 		c := grantpolicy.Config{BaseURL: cfg.GrantURL, AppKeyFile: cfg.AppKeyFile, OrganizationID: binding.OrganizationID, ProviderID: binding.ProviderID, PEPClientID: binding.PEPClientID, CatalogGeneration: binding.CatalogGeneration, CatalogDigest: binding.CatalogDigest, Operations: make(map[string]grantpolicy.Binding)}
+		headers := make(map[string][]string)
 		for _, route := range sharedRoutes() {
 			pin, ok := binding.Operations[route.operation]
 			if !ok {
 				continue
 			}
+			names, valid := sharedForwardHeaders(pin.ForwardHeaders)
+			if !valid {
+				return bad()
+			}
+			headers[route.operation] = names
 			c.Operations[route.operation] = grantpolicy.Binding{CapabilityID: pin.CapabilityID, CapabilityVersion: pin.CapabilityVersion, ContractDigest: pin.ContractDigest, ActionID: pin.ActionID, ResourceType: binding.ResourceType, ResourceID: binding.ResourceID, ResourceEvidence: binding.ResourceEvidence}
 		}
 		if len(c.Operations) != len(binding.Operations) {
@@ -129,7 +163,7 @@ func (s *serviceConfig) configureShared() error {
 		if err != nil {
 			return bad()
 		}
-		prepared.bindings[key] = &sharedContext{organization: binding.OrganizationID, workspace: binding.WorkspaceID, policy: policy, operations: c.Operations}
+		prepared.bindings[key] = &sharedContext{organization: binding.OrganizationID, workspace: binding.WorkspaceID, policy: policy, operations: c.Operations, forwardHeaders: headers}
 	}
 	s.shared = prepared
 	return nil
@@ -196,7 +230,7 @@ func sharedPathID(id string) bool {
 	return true
 }
 
-func sharedSnapshot(r *http.Request, organization, workspace string) (string, grantpolicy.ActualSnapshot, error) {
+func sharedSnapshot(r *http.Request, organization, workspace string, declaredHeaders []string) (string, grantpolicy.ActualSnapshot, error) {
 	denied := func() (string, grantpolicy.ActualSnapshot, error) {
 		return "", grantpolicy.ActualSnapshot{}, beesuh.ErrForbidden
 	}
@@ -216,6 +250,28 @@ func sharedSnapshot(r *http.Request, organization, workspace string) (string, gr
 		}
 		// Bind the original value, including parameters, rather than MIME reserialization.
 		headers = "content-type:" + contentType + "\n" + headers
+	}
+	if declaredHeaders != nil {
+		var preimage strings.Builder
+		for _, name := range declaredHeaders {
+			var values []string
+			present := false
+			for key, v := range r.Header {
+				if strings.EqualFold(key, name) {
+					present = true
+					values = append(values, v...)
+				}
+			}
+			if !present {
+				continue
+			}
+			// No multi-value canonicalization contract exists; bind one raw value.
+			if len(values) != 1 || !utf8.ValidString(values[0]) || strings.IndexFunc(values[0], func(c rune) bool { return c < 32 && c != '\t' || c == 127 }) >= 0 {
+				return denied()
+			}
+			preimage.WriteString(name + ":" + values[0] + "\n")
+		}
+		headers = preimage.String()
 	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
@@ -276,7 +332,29 @@ func (s *serviceConfig) authenticateShared(r *http.Request, human beesuh.Princip
 	}
 	workspace, ok := singleSharedHeader(r.Header, "X-Workspace-ID")
 	if !ok {
-		return beesuh.Principal{}, beesuh.ErrForbidden
+		// Only a truly absent selector may use a single constant workspace.
+		for key := range r.Header {
+			if strings.EqualFold(key, "X-Workspace-ID") {
+				return beesuh.Principal{}, beesuh.ErrForbidden
+			}
+		}
+		if len(s.shared.bindings) != 1 {
+			return beesuh.Principal{}, beesuh.ErrForbidden
+		}
+		operation, valid := sharedOperation(r.Method, r.URL.Path)
+		for _, candidate := range s.shared.bindings {
+			names := candidate.forwardHeaders[operation]
+			pin, enabled := candidate.operations[operation]
+			if !valid || !enabled || names == nil || candidate.organization != org || pin.ResourceType != "workspace" || pin.ResourceID != candidate.workspace || pin.ResourceEvidence.Kind != "constant" || pin.ResourceEvidence.CanonicalValue != candidate.workspace || pin.ResourceEvidence.Name != "" {
+				return beesuh.Principal{}, beesuh.ErrForbidden
+			}
+			for _, name := range names {
+				if name == "x-workspace-id" {
+					return beesuh.Principal{}, beesuh.ErrForbidden
+				}
+			}
+			workspace = candidate.workspace
+		}
 	}
 	binding, ok := s.shared.bindings[sharedBindingKey{org, workspace}]
 	if !ok {
@@ -287,7 +365,8 @@ func (s *serviceConfig) authenticateShared(r *http.Request, human beesuh.Princip
 	if !ok || authorization != "Bearer "+token {
 		return beesuh.Principal{}, beesuh.ErrUnauthenticated
 	}
-	operation, actual, err := sharedSnapshot(r, binding.organization, binding.workspace)
+	operation, _ := sharedOperation(r.Method, r.URL.Path)
+	operation, actual, err := sharedSnapshot(r, binding.organization, binding.workspace, binding.forwardHeaders[operation])
 	if err != nil {
 		return beesuh.Principal{}, err
 	}

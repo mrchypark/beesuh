@@ -43,9 +43,69 @@ The proposed action mapping is `run_execute`, `connection_select`,
 registered metadata, not capability IDs or catalog/contract pins. Use the fresh
 owner packet for actual capability IDs, versions and digests.
 
-The owner-confirmed Exposure/catalog contract binds lowercase sorted forwarded
-header names with exact values and a trailing LF. GET and bodyless operations
-bind the two validated server selectors:
+## Forwarded-header profiles
+
+Each operation pin may declare `forward_headers`: a sorted, unique list of
+nonempty header names containing only lowercase ASCII `a-z`, digits `0-9` and
+hyphens. Sensitive, hop-by-hop and transport-controlled names are forbidden:
+`authorization`, `proxy-authorization`, `proxy-authenticate`, `cookie`,
+`set-cookie`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`,
+`upgrade`, `host`, `content-length`. Hash only declared headers
+actually present on the request, as `name:raw-value` followed by LF, in list
+order. Do not synthesize missing headers. The original Bearer is bound separately
+by its credential digest; method/path, canonical query and raw body hash/length
+remain bound independently.
+
+Each present declared header must have exactly one valid UTF-8 raw value.
+The generic digest loop rejects ASCII controls except HTAB, and rejects DEL;
+it permits empty values, spaces and commas, and imposes no 256-byte limit.
+Values from differently cased occurrences are combined before the single-value
+check. Accepted raw values are hashed unchanged, without trimming or normalization.
+Organization/workspace selectors and chat/selection Content-Type separately
+retain their stricter `singleSharedHeader` validation: one nonempty value of at
+most 256 bytes, valid UTF-8, no CR/LF/NUL or surrounding whitespace, and no commas
+except in Content-Type. Content-Type must also parse as `application/json`.
+
+Omitting `forward_headers` retains v0.5 legacy behavior: a single matching
+`X-Workspace-ID` is required, GET/bodyless operations bind both selectors, and
+chat/selection bind Content-Type plus both selectors. Explicit `[]` is valid
+and hashes the empty preimage; explicit `null` is invalid. Empty metadata does
+not waive identity, organization, Content-Type or body/query validation.
+
+### New single-constant-workspace profile
+
+For the first scope, configure exactly one context for `cypark-default` and
+explicit operation metadata excluding `x-workspace-id`:
+
+- GET: `"forward_headers": ["x-organization-id"]`
+- Chat/selection POST: `"forward_headers": ["content-type", "x-organization-id"]`
+
+Exposure's corresponding `request.forwardHeaders` lists must contain these same
+names, without the unsupported `x-workspace-id`. No new nginx hop is needed.
+These are consumer configuration requirements, not upstream or live approval.
+
+With `X-Organization-ID: operable`, the exact GET preimage is:
+
+```text
+x-organization-id:operable
+```
+
+Its digest is `sha256:d4acfbfe68c7544aacf2625a708860c5029ff58dc85705403afd60add17ace8f`.
+The POST preimage for exactly `Content-Type: application/json` is:
+
+```text
+content-type:application/json
+x-organization-id:operable
+```
+
+Its digest is `sha256:b19b9c03c91f1cbacfbf48e3e3e4479dd9e4a89a0ab99659ff44b8351675bd59`.
+Explicit `[]` hashes to
+`sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+All nonempty preimages above end in LF.
+
+### Legacy v0.5 preimages (field omitted)
+
+GET/bodyless:
 
 ```text
 x-organization-id:operable
@@ -73,8 +133,9 @@ from both header preimages and bound separately by the credential digest.
 
 Owner source `20683606` requires `content-type` in POST `request.forwardHeaders`
 when `request.contentTypes` declares `application/json`; it is not automatically
-forwarded. Such POST capabilities must forward/bind all three headers, while
-GET/bodyless capabilities use just the two selectors. No HTTP transport
+forwarded. Legacy POST capabilities bind all three headers, while legacy
+GET/bodyless capabilities bind two. New explicit lists above bind two and one,
+respectively. No HTTP transport
 workaround or automatic Content-Type insertion is added.
 
 The owner-confirmed POST catalog `maxBytes` is `262144` (256 KiB), matching
@@ -82,8 +143,8 @@ Bee's existing `sharedBodyLimit`. `65536` was only an example, not an official
 ceiling. Exposure's global `MAX_REQUEST_BYTES` must be at least `262144`; its
 supplied default is 4 MiB. No smaller Bee limit or additional validation is
 introduced. Forward Content-Type's raw value, including parameters, and bind it
-as the first of the three POST header lines; GET/bodyless operations retain only
-the two selector lines.
+only when declared. POST Content-Type validation remains mandatory even when it
+is excluded from the explicit digest list.
 
 Exposure owner source `20683606` confirms only `pathSegment`, `queryScalar`,
 `constant` and `jsonPointer` resource extractors; there is no header extractor.
@@ -94,7 +155,9 @@ The current one-workspace baseline therefore uses type `workspace`, resource ID
 {"kind":"constant","name":"","canonicalValue":"cypark-default"}
 ```
 
-Use that resource/evidence for all nine capabilities in the owner catalog.
+Use that resource/evidence for each enabled capability in the owner catalog.
+The Exposure resource selector is `{"kind":"constant","value":"cypark-default"}`;
+do not add `constant.format` or a `format` field to this selector.
 Forwarded selector hashing and resource extraction are separate contracts.
 Grant must still authorize the actual organization member/learner role against
 that workspace, and Bee independently checks headers and body/query workspace
@@ -148,19 +211,22 @@ audiences from their owners. Digest placeholders deliberately fail validation.
           "capability_id": "OWNER_CONNECTION_OPTIONS_CAPABILITY",
           "capability_version": 1,
           "contract_digest": "sha256:OWNER_SUPPLIED_64_LOWERCASE_HEX",
-          "action_id": "OWNER_CONNECTION_OPTIONS_ACTION"
+          "action_id": "OWNER_CONNECTION_OPTIONS_ACTION",
+          "forward_headers": ["x-organization-id"]
         },
         "connection_select": {
           "capability_id": "OWNER_CONNECTION_SELECT_CAPABILITY",
           "capability_version": 1,
           "contract_digest": "sha256:OWNER_SUPPLIED_64_LOWERCASE_HEX",
-          "action_id": "OWNER_CONNECTION_SELECT_ACTION"
+          "action_id": "OWNER_CONNECTION_SELECT_ACTION",
+          "forward_headers": ["content-type", "x-organization-id"]
         },
         "run_execute": {
           "capability_id": "OWNER_RUN_EXECUTE_CAPABILITY",
           "capability_version": 1,
           "contract_digest": "sha256:OWNER_SUPPLIED_64_LOWERCASE_HEX",
-          "action_id": "OWNER_RUN_EXECUTE_ACTION"
+          "action_id": "OWNER_RUN_EXECUTE_ACTION",
+          "forward_headers": ["content-type", "x-organization-id"]
         }
       }
     }]
@@ -174,6 +240,10 @@ authorization, before Grant policy evaluation, Goauthy metadata/key delivery or
 model dispatch. Unknown operation keys and malformed pins refuse startup. Adding
 UI history, run lookup, provider listing or cancellation requires their actual
 registered pins, not fabricated aliases of `run_execute`.
+
+`goauthy.resource` remains one connections-resource audience, not a per-operation
+resource map. Model keys remain memory-only and must not enter environment
+variables, Kubernetes Secrets, logs or persisted execution/history records.
 
 There may be 1–128 contexts for one organization, with unique
 `(organization_id, workspace_id)` pairs. Every configured operation must have a
@@ -221,7 +291,14 @@ is an `api_key` provider/connector here, not OAuth2. Do not set `api_key`,
 ## Request identity and UI routes
 
 Every request carries the exact original `Authorization: Bearer <human-token>`
-plus single `X-Organization-ID` and `X-Workspace-ID` selectors. Use the canonical
+plus a single `X-Organization-ID`. Legacy operations also require a single
+`X-Workspace-ID`. In the new profile, an absent workspace header selects a
+context only when exactly one context exists, its resource type is `workspace`,
+its resource ID equals its workspace ID, its evidence is `constant` with that
+same canonical value and an empty name, and the requested operation has explicit
+`forward_headers` excluding `x-workspace-id`. A present workspace header must
+still be single and match the configured context. Multiple contexts never use
+an implicit fallback, even if only one seems eligible. Use the canonical
 Bearer spelling shown here. The token is introspected against the pinned
 authority, requiring active status, subject, API audience, future expiry, valid
 not-before and scopes. `openid` and matching UserInfo subject prove the human
@@ -232,7 +309,8 @@ editable organization claim or caller-supplied principal establishes identity.
 
 The server maps selectors only into its configured registry, hashes
 `(configured issuer, verified sub)` into the user ID, and asks Grant about that
-human's registered workspace operation. Unknown, missing or ambiguous selectors
+human's registered workspace operation. Unknown or ambiguous selectors, missing
+organization, and missing workspace outside the explicit single-context rule
 fail closed. Registry presence is not learner permission: the owner must provide
 the actual Grant learner/resource relationship and Exposure routing/catalog
 registration. Bee forwards the original human Bearer to Grant; this profile
@@ -324,20 +402,22 @@ not a supported Bee query key. Chat and selection POSTs additionally require
    {"provider":"minimax","request_id":"request-1","session_id":"SESSION_ID","message_id":"MESSAGE_ID","state":"succeeded","output":{"text":"Hello"}}
    ```
 
-Run lookup returns HTTP 200 with `{"session_id":"","state":"running"}` while
+Run lookup returns HTTP 200 with `{"request_id":"request-1","session_id":"","state":"running"}` while
 a stored run is active, the stored result after completion, or 404 if no row
 exists yet. A concurrent submission may not have created its row when polled.
 History returns an array of the latest 200 journal entries in ascending sequence
 order, with `sequence`, `request_id`, `kind` and `payload`; it has no cursor and
 is not exclusively a chat-message array. Completed identical requests replay their
 stored result; conflicting reuse of a request ID returns 409.
+The native model path rejects blank text; an empty text response is not a
+successful chat example.
 
 ### Denial examples
 
 | Request condition | Consumer-visible result |
 | --- | --- |
 | Missing/invalid/expired human Bearer or required API audience/scope | Authentication fails; HTTP 401 |
-| Missing, duplicate or unknown org/workspace selector; omitted operation pin; Grant denies | Shared authorization fails; HTTP 403 |
+| Missing/duplicate/unknown organization; duplicate/mismatched workspace; missing workspace outside the explicit single-context rule; omitted operation pin; Grant denies | Shared authorization fails; HTTP 403 |
 | Chat body or lookup/history query workspace differs from selected workspace | HTTP 403; no access to the other workspace |
 | Missing/malformed/non-JSON chat or selection Content-Type | HTTP 403 before Grant evaluation or credential delivery |
 | Missing connections audience/read/use scope, wrong consumer, revoked or mismatched consent | Connection discovery/selection or execution fails; no model dispatch |
@@ -404,7 +484,7 @@ To exercise the real flow, owners still need to supply the actual catalog and
 capability pins, learner/resource registration, app-key provisioning and
 credential-hint audience; confirm actual token issuance for the supplied
 issuer/client/API/resource audiences and required scopes; supply catalog pins
-matching the confirmed POST-three-header/GET-two-header contract; and supply the approved Goauthy
+matching the selected explicit-header or legacy contract; and supply the approved Goauthy
 provider/connector/delivery grant for the configured model endpoint. The owner
 has confirmed original-human-Bearer forwarding as the source contract; its live
 deployment has not been verified here.

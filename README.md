@@ -90,6 +90,16 @@ go run ./cmd/beesuh \
 서비스 설정과 자격증명이 없는 provider 설정은
 [OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
 
+For the shared organization/workspace profile, see
+[shared HTTP configuration and UI routes](docs/shared-http.md). It keeps the
+original verified human Bearer, checks Grant separately from Goauthy consent,
+and supports a nonempty subset of registered operations. The example targets
+`openai-compatible` / `minimax-m3.1-flash` at the fixed OpenCode endpoint;
+the document specifies token audiences/scopes, request/response shapes and denial
+cases. Select a release containing this profile and verify its image digest and
+actual owner registrations before deployment. The first Operable integration
+does not advertise cancellation or streaming.
+
 ```sh
 go run ./cmd/beesuh -listen 127.0.0.1:8080 \
   -service-config ./config/service.json -providers ./config/providers.json

@@ -86,13 +86,14 @@ type Request struct {
 }
 
 type Result struct {
-	Provider  string          `json:"provider,omitempty"`
-	RequestID string          `json:"request_id,omitempty"`
-	SessionID string          `json:"session_id"`
-	MessageID string          `json:"message_id,omitempty"`
-	State     string          `json:"state"`
-	Output    json.RawMessage `json:"output,omitempty"`
-	Error     string          `json:"error,omitempty"`
+	CancellationRequested bool            `json:"cancellation_requested,omitempty"`
+	Provider              string          `json:"provider,omitempty"`
+	RequestID             string          `json:"request_id,omitempty"`
+	SessionID             string          `json:"session_id"`
+	MessageID             string          `json:"message_id,omitempty"`
+	State                 string          `json:"state"`
+	Output                json.RawMessage `json:"output,omitempty"`
+	Error                 string          `json:"error,omitempty"`
 	// FailureCategory is a bounded public classification of a terminal failure.
 	// It lets a replay return the same API category as the original execution
 	// without parsing diagnostic text or serializing an error implementation.
@@ -130,6 +131,9 @@ type Runtime struct {
 	mu       sync.Mutex
 	locks    map[string]*sessionLock
 	capacity CapacityLimits
+	// cancelMu never acquires a request/session lock held across execution.
+	cancelMu sync.Mutex
+	controls map[string]map[*runControl]struct{}
 }
 
 // runtimeDB keeps production on Rhiza while allowing deterministic storage
@@ -223,7 +227,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	err = db.Migrate(ctx, []rhiza.Migration{{Version: 1, Name: "sessions-and-runs", Statements: []rhiza.SQLStatement{
 		{SQL: `CREATE TABLE sessions (workspace TEXT NOT NULL, session_key TEXT NOT NULL, backend TEXT NOT NULL, directory TEXT NOT NULL, profile TEXT NOT NULL, session_id TEXT NOT NULL, active_request TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,session_key))`},
 		{SQL: `CREATE TABLE runs (workspace TEXT NOT NULL, request_id TEXT NOT NULL, session_key TEXT NOT NULL, input_hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,request_id))`},
-	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration})
+	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration, cancellationMigration, organizationMigration})
 	if err == nil {
 		err = r.pinIdentityMode(ctx)
 	}
@@ -278,6 +282,8 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 func (r *Runtime) Close() error {
 	r.life.Lock()
 	defer r.life.Unlock()
+	r.cancelMu.Lock()
+	defer r.cancelMu.Unlock()
 	if r.closed {
 		return nil
 	}
@@ -287,7 +293,7 @@ func (r *Runtime) Close() error {
 
 // Run stores the result before returning it. Repeating an identical request
 // returns that stored result; it never sends a second prompt.
-func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
+func (r *Runtime) Run(ctx context.Context, req Request) (result Result, resultErr error) {
 	if err := rejectResolverReentry(ctx); err != nil {
 		return Result{}, err
 	}
@@ -326,6 +332,12 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	unregister := r.registerRun(req.WorkspaceID, req.RequestID, cancel)
+	defer unregister()
+	defer r.cancelledAdmission(req.WorkspaceID, req.RequestID, &result, &resultErr)
+	if out, found, err := r.cancellationReplay(ctx, req.WorkspaceID, req.RequestID); found || err != nil {
+		return out, err
+	}
 	select {
 	case r.admission <- struct{}{}:
 		defer func() { <-r.admission }()
@@ -401,7 +413,7 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 	// the running row plus active_request committed, which Recover
 	// discovers) or neither, with no external dispatch to reconcile. Installing a
 	// run fence here would strand the workspace with no evidence to lift it.
-	err = r.startRun(ctx, req, hash)
+	err = r.startCancellableRun(ctx, req, hash)
 	if err != nil {
 		return Result{}, err
 	}
@@ -457,10 +469,13 @@ func (r *Runtime) Run(ctx context.Context, req Request) (Result, error) {
 		out.State, out.Output = "failed", nil
 		setFailure(&out, runErr)
 	}
-	if err := r.finish(cleanup, req.WorkspaceID, req.SessionKey, req.RequestID, out); err != nil {
+	if err := r.finishResult(cleanup, req.WorkspaceID, req.SessionKey, req.RequestID, &out); err != nil {
 		r.fenceWorkspace(req.WorkspaceID)
 		out.State, out.Error = "uncertain", ErrUncertain.Error()
 		return out, errors.Join(ErrUncertain, err)
+	}
+	if out.State == "cancelled" {
+		return out, nil
 	}
 	return out, runErr
 }
@@ -491,7 +506,7 @@ func (r *Runtime) previous(ctx context.Context, req Request, hash string) (Resul
 	if err := json.Unmarshal([]byte(rows[0][2].(string)), &out); err != nil {
 		return Result{}, true, err
 	}
-	if out.State != "succeeded" {
+	if out.State != "succeeded" && out.State != "cancelled" {
 		return out, true, replayFailure(out.FailureCategory, out.Error)
 	}
 	return out, true, nil
@@ -1015,6 +1030,10 @@ func (r *Runtime) stopSession(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) finish(ctx context.Context, workspace, key, request string, out Result) error {
+	return r.finishResult(ctx, workspace, key, request, &out)
+}
+
+func (r *Runtime) finishStored(ctx context.Context, workspace, key, request string, out Result) error {
 	b, err := json.Marshal(out)
 	if err != nil {
 		return err

@@ -39,8 +39,10 @@ func rejectResolverReentry(ctx context.Context) error {
 // Principal is established by the hosting service, never by request JSON or
 // unverified identity headers. It deliberately contains no browser session/token.
 type Principal struct {
-	UserID      string `json:"user_id"`
-	WorkspaceID string `json:"workspace_id"`
+	// OrganizationID is optional; empty preserves the personal storage namespace.
+	OrganizationID string `json:"organization_id,omitempty"`
+	UserID         string `json:"user_id"`
+	WorkspaceID    string `json:"workspace_id"`
 }
 
 type principalKey struct{}
@@ -60,7 +62,7 @@ func (r *Runtime) requirePrincipal(ctx context.Context) (Principal, error) {
 		return Principal{}, err
 	}
 	p, ok := PrincipalFromContext(ctx)
-	if !ok || validIdentity(p.UserID, p.WorkspaceID) != nil || strings.ContainsAny(p.UserID+p.WorkspaceID, "\r\n") {
+	if !ok || !validOrganizationID(p.OrganizationID) || validIdentity(p.UserID, p.WorkspaceID) != nil || strings.ContainsAny(p.UserID+p.WorkspaceID, "\r\n") {
 		return Principal{}, ErrUnauthenticated
 	}
 	if !utf8.ValidString(p.UserID) || !utf8.ValidString(p.WorkspaceID) {
@@ -97,7 +99,19 @@ func (r *Runtime) scopedWorkspace(ctx context.Context, workspace string) (string
 	}
 	// All existing session, request, memory and journal keys use this namespace.
 	// JSON tuple encoding avoids delimiter collisions and hides raw identity in IDs.
-	return "user_" + digest([]string{p.UserID, p.WorkspaceID}), nil
+	return identityNamespace(p.OrganizationID, p.UserID, p.WorkspaceID), nil
+}
+
+func validOrganizationID(id string) bool {
+	return id == "" || (validConnectionText(id) && utf8.ValidString(id))
+}
+
+// Keep the original pair for personal data; organization scopes use a triple.
+func identityNamespace(organization, user, workspace string) string {
+	if organization != "" {
+		return "user_" + digest([]string{organization, user, workspace})
+	}
+	return "user_" + digest([]string{user, workspace})
 }
 
 // scopedWorkspaceForConnection maps a connection's stored workspace onto the
@@ -108,7 +122,7 @@ func (r *Runtime) scopedWorkspaceForConnection(c Connection) string {
 	if !r.opts.RequireIdentity {
 		return c.WorkspaceID
 	}
-	return "user_" + digest([]string{c.UserID, c.WorkspaceID})
+	return identityNamespace(c.OrganizationID, c.UserID, c.WorkspaceID)
 }
 
 func (r *Runtime) bindRequest(ctx context.Context, req *Request) error {
@@ -211,8 +225,11 @@ func (r *Runtime) resolveCredential(ctx context.Context, c Connection) (credenti
 	if err := rejectResolverReentry(ctx); err != nil {
 		return Credential{}, err
 	}
-	if !utf8.ValidString(c.ID) || !utf8.ValidString(c.UserID) || !utf8.ValidString(c.WorkspaceID) || !utf8.ValidString(c.TargetID) || !utf8.ValidString(c.CredentialRef) {
+	if !utf8.ValidString(c.OrganizationID) || !utf8.ValidString(c.ID) || !utf8.ValidString(c.UserID) || !utf8.ValidString(c.WorkspaceID) || !utf8.ValidString(c.TargetID) || !utf8.ValidString(c.CredentialRef) {
 		return Credential{}, errors.Join(ErrConnectionUnavailable, errInvalidUTF8Identifier, errors.New("beesuh: connection identifiers must be valid UTF-8"))
+	}
+	if !validOrganizationID(c.OrganizationID) {
+		return Credential{}, ErrForbidden
 	}
 	credential, err = r.opts.ResolveCredential(context.WithValue(ctx, resolverReentryKey{}, true), c)
 	if err != nil {
@@ -293,7 +310,7 @@ func (r *Runtime) connectionAuthError(ctx context.Context, c Connection, err err
 		if c.State == "ready" {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
-			if e := r.mutate(cleanup, []rhiza.SQLStatement{{SQL: `UPDATE connections SET state='needs_login',generation=generation+1 WHERE id=? AND generation=? AND state='ready'`, Args: []any{c.ID, c.Generation}, ExpectedRowsAffected: one()}}); e != nil {
+			if e := r.mutate(cleanup, []rhiza.SQLStatement{{SQL: `UPDATE connections SET state='needs_login',generation=generation+1 WHERE id=? AND organization_id=? AND user_id=? AND workspace_id=? AND generation=? AND state='ready'`, Args: []any{c.ID, c.OrganizationID, c.UserID, c.WorkspaceID, c.Generation}, ExpectedRowsAffected: one()}}); e != nil {
 				// This is a connection-scoped obligation, not a workspace run
 				// fence. Nothing was dispatched and no active_request exists, so a
 				// workspace fence would be unliftable. Return ErrUncertain so the

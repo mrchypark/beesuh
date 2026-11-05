@@ -133,6 +133,16 @@ func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, e
 	defer func() { close(done); stop() }()
 	rpc := &appServerRPC{in: inPipe, scan: bufio.NewScanner(outPipe), source: c.codexAuth, accountID: c.codexAccountID}
 	rpc.scan.Buffer(make([]byte, 4096), maxResponseBytes+1)
+	return c.completeAppServerSession(ctx, in, rpc, tokens, work)
+}
+
+func (c *Client) completeAppServerSession(ctx context.Context, in Request, rpc *appServerRPC, tokens CodexAuthTokens, work string) (response Response, err error) {
+	defer func() {
+		// Cancellation can close pipes while a buffered response is still being decoded.
+		if ctx.Err() != nil {
+			response, err = Response{}, ctx.Err()
+		}
+	}()
 	if _, err := rpc.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "beesuh", "version": "0.1"}, "capabilities": map[string]any{"experimentalApi": true}}); err != nil {
 		return Response{}, err
 	}
@@ -164,9 +174,6 @@ func (c *Client) completeAppServer(ctx context.Context, in Request) (Response, e
 	}
 	content, err := rpc.waitTurn(ctx, threadID, turnID)
 	if err != nil {
-		if ctx.Err() != nil {
-			return Response{}, ctx.Err()
-		}
 		return Response{}, err
 	}
 	out, err := decodeCodexOutput([]byte(content), in.Tools)

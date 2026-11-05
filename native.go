@@ -280,10 +280,13 @@ func (r *Runtime) runNative(ctx context.Context, req Request, sessionID string, 
 	} else {
 		out.Output = output
 	}
-	if finishErr := r.finish(cleanup, req.WorkspaceID, req.SessionKey, req.RequestID, out); finishErr != nil {
+	if finishErr := r.finishResult(cleanup, req.WorkspaceID, req.SessionKey, req.RequestID, &out); finishErr != nil {
 		r.fenceWorkspace(req.WorkspaceID)
 		out.State, out.Error, out.Output = "uncertain", ErrUncertain.Error(), nil
 		return out, errors.Join(ErrUncertain, finishErr)
+	}
+	if out.State == "cancelled" {
+		return out, nil
 	}
 	return out, err
 }
@@ -347,7 +350,7 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 	}
 	// Persisted terminal failures are surfaced even though incomplete transcripts
 	// are excluded from model context, so a later turn cannot assume no effects.
-	failures, err := r.query(ctx, `SELECT request_id,state FROM runs WHERE workspace=? AND session_key=? AND state IN ('failed','interrupted') ORDER BY rowid DESC LIMIT 5`, req.WorkspaceID, req.SessionKey)
+	failures, err := r.query(ctx, `SELECT request_id,state FROM runs WHERE workspace=? AND session_key=? AND state IN ('failed','interrupted','cancelled') ORDER BY rowid DESC LIMIT 5`, req.WorkspaceID, req.SessionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -434,6 +437,9 @@ func (r *Runtime) nativeLoop(ctx context.Context, req Request, sessionID string,
 			return b, nil
 		}
 		for _, call := range msg.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if r.opts.RequireIdentity {
 				if err := r.checkConnection(ctx, req.ConnectionID, "provider", providerID); err != nil {
 					return nil, err
@@ -642,10 +648,18 @@ func (r *Runtime) GetRun(ctx context.Context, workspace, request string) (Result
 		return Result{}, err
 	}
 	if len(rows) == 0 {
+		requested, err := r.cancellationRequested(ctx, workspace, request)
+		if err != nil {
+			return Result{}, err
+		}
+		if requested {
+			return cancelledResult(request), nil
+		}
 		return Result{}, ErrNotFound
 	}
 	if rows[0][0] == "running" {
-		return Result{State: "running"}, nil
+		requested, err := r.cancellationRequested(ctx, workspace, request)
+		return Result{RequestID: request, State: "running", CancellationRequested: requested}, err
 	}
 	var out Result
 	err = json.Unmarshal([]byte(rows[0][1].(string)), &out)
@@ -693,7 +707,7 @@ func (r *Runtime) Providers(ctx context.Context) ([]ProviderInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		rows, err := r.query(ctx, `SELECT id,target_id FROM connections WHERE user_id=? AND workspace_id=? AND kind='provider' AND state='ready' AND credential_ref<>'' ORDER BY id`, p.UserID, p.WorkspaceID)
+		rows, err := r.query(ctx, `SELECT id,target_id FROM connections WHERE organization_id=? AND user_id=? AND workspace_id=? AND kind='provider' AND state='ready' AND credential_ref<>'' ORDER BY id`, p.OrganizationID, p.UserID, p.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}

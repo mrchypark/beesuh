@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/mrchypark/beesuh/auth"
@@ -276,5 +277,142 @@ func TestCodexAppServerCancellationClosesDetachedStdout(t *testing.T) {
 	_, err = client.completeAppServer(ctx, Request{Messages: []Message{{Role: "user", Content: "x"}}})
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("call did not terminate on cancellation: %v", err)
+	}
+}
+
+// Match only complete frames and retain bytes not consumed by the scanner.
+type cancellationGatedReader struct {
+	reader  *bufio.Reader
+	marker  []byte
+	trigger func()
+	pending []byte
+	err     error
+	gated   bool
+}
+
+func (r *cancellationGatedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 {
+		if r.err != nil {
+			return 0, r.err
+		}
+		r.pending, r.err = r.reader.ReadBytes('\n')
+		if r.err == nil && !r.gated && bytes.Contains(r.pending, r.marker) {
+			r.gated = true
+			r.trigger()
+		}
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
+// Synthetic deadlines exercise normalization, not the runtime's timer implementation.
+type cancellationCauseContext struct{ context.Context }
+
+func (c cancellationCauseContext) Err() error {
+	if c.Context.Err() != nil {
+		return context.Cause(c.Context)
+	}
+	return nil
+}
+
+type sessionTestWriter struct{ closed bool }
+
+func (w *sessionTestWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return len(p), nil
+}
+
+const sessionTestWire = `{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"result":{}}
+{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread"}}}
+{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn"}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","items":[{"type":"agentMessage","text":"{\"content\":\"ok\",\"tool_calls\":[]}"}]}}}
+`
+
+func TestCodexAppServerSessionCancellation(t *testing.T) {
+	for _, phase := range []string{"initialize", "terminal"} {
+		for _, want := range []error{context.DeadlineExceeded, context.Canceled} {
+			t.Run(phase+"/"+want.Error(), func(t *testing.T) {
+				base, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				ctx := cancellationCauseContext{base}
+				writer := &sessionTestWriter{}
+				marker := []byte(`"id":1`)
+				if phase == "terminal" {
+					marker = []byte(`"method":"turn/completed"`)
+				}
+				reader := &cancellationGatedReader{
+					reader: bufio.NewReader(iotest.OneByteReader(strings.NewReader(sessionTestWire))), marker: marker,
+					trigger: func() { cancel(want); writer.closed = true },
+				}
+				rpc := &appServerRPC{in: writer, scan: bufio.NewScanner(reader)}
+				response, err := (&Client{model: "test"}).completeAppServerSession(ctx, Request{Messages: []Message{{Role: "user", Content: "x"}}}, rpc, CodexAuthTokens{}, "")
+				if !reader.gated || ctx.Err() != want {
+					t.Fatal("selected cancellation boundary was not exercised")
+				}
+				if !errors.Is(err, want) || response.Message.Content != "" {
+					t.Fatalf("response=%+v err=%v; want empty response and %v", response, err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCancellationGatedReaderSplitMarkerAndUnreadBytes(t *testing.T) {
+	const before = "{\"id\":1,\"result\":{}}\n"
+	const selected = "{\"method\":\"turn/completed\"}\n"
+	const after = "{\"id\":9,\"result\":{}}\n"
+	calls := 0
+	reader := &cancellationGatedReader{
+		reader: bufio.NewReader(io.MultiReader(strings.NewReader(before+`{"method":"tur`), strings.NewReader("n/completed\"}\n"+after))),
+		marker: []byte(`"method":"turn/completed"`), trigger: func() { calls++ },
+	}
+	prefix := make([]byte, len(before))
+	if _, err := io.ReadFull(reader, prefix); err != nil {
+		t.Fatal(err)
+	}
+	if string(prefix) != before || calls != 0 {
+		t.Fatal("gate triggered before selected frame")
+	}
+	one := make([]byte, 1)
+	if _, err := io.ReadFull(reader, one); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("split marker did not trigger at complete frame")
+	}
+	rest, err := io.ReadAll(reader)
+	if err != nil || string(one)+string(rest) != selected+after || calls != 1 {
+		t.Fatalf("unread bytes lost or gate repeated: %q, %v, calls=%d", string(one)+string(rest), err, calls)
+	}
+}
+
+func TestCodexAppServerSessionUncanceledControls(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire, want string
+		closed           bool
+	}{
+		{name: "invalid", wire: "not-json\n", want: "model: invalid Codex app-server response"},
+		{name: "unavailable", want: "model: Codex app-server unavailable"},
+		{name: "closed-write", wire: sessionTestWire, closed: true, want: "model: Codex app-server unavailable"},
+		{name: "success", wire: sessionTestWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpc := &appServerRPC{in: &sessionTestWriter{closed: tc.closed}, scan: bufio.NewScanner(strings.NewReader(tc.wire))}
+			response, err := (&Client{}).completeAppServerSession(context.Background(), Request{}, rpc, CodexAuthTokens{}, "")
+			if tc.want == "" {
+				if err != nil || response.Message.Content != "ok" {
+					t.Fatalf("response=%+v err=%v", response, err)
+				}
+			} else if err == nil || err.Error() != tc.want {
+				t.Fatalf("got %v; want %s", err, tc.want)
+			}
+		})
 	}
 }

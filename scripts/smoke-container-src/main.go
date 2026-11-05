@@ -1,4 +1,4 @@
-// Test-only TLS issuer for the container smoke; never delivers model credentials.
+// Test-only TLS authority and fake model for the isolated container smoke.
 package main
 
 import (
@@ -17,12 +17,28 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 const issuer = "https://smoke-issuer:8443"
+const serviceAudience = "urn:bee:smoke-api"
 
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "scan" {
+		if err := scan(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) == 3 && (os.Args[1] == "exercise" || os.Args[1] == "resume" || strings.HasPrefix(os.Args[1], "shared-")) {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if err := runFlow(ctx, os.Args[2], os.Args[1]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "probe" {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
@@ -109,6 +125,10 @@ func probeResponse(ctx context.Context, client *http.Client, url, token string, 
 
 func fixtureHandler() http.Handler {
 	mux := http.NewServeMux()
+	policy := newFixturePolicy()
+	mux.Handle("/api/v2/http-capabilities/decide", policy)
+	mux.HandleFunc("/smoke/expect", policy.expect)
+	mux.HandleFunc("/smoke/policy-stats", policy.stats)
 	mux.HandleFunc("POST /introspect", func(w http.ResponseWriter, r *http.Request) {
 		client, secret, ok := r.BasicAuth()
 		if !ok || client != "beesuh-smoke" || secret != "smoke-client-secret" {
@@ -120,23 +140,47 @@ func fixtureHandler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if r.Form.Get("token") != "smoke-access-token" {
+		token := r.Form.Get("token")
+		if token != "smoke-access-token" && token != "smoke-nonmember-token" && token != "smoke-wrong-user-token" && token != "smoke-wrong-audience-token" && token != "smoke-wrong-client-token" && token != "smoke-no-use-token" && token != "smoke-no-connections-audience-token" {
 			fmt.Fprintln(w, `{"active":false}`)
 			return
 		}
 		log.Print("validated introspection")
-		_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "sub": "smoke-user", "iss": issuer, "aud": "beesuh-smoke", "client_id": "beesuh-smoke", "scope": "openid execute", "token_type": "Bearer", "exp": time.Now().Add(time.Minute).Unix()})
+		subject, client := "smoke-user", "beesuh-smoke"
+		audiences := []string{serviceAudience, resource}
+		if token == "smoke-nonmember-token" {
+			subject = "nonmember-user"
+		}
+		if token == "smoke-wrong-audience-token" {
+			audiences = []string{"urn:foreign:api"}
+		}
+		if token == "smoke-wrong-client-token" {
+			client = "foreign-client"
+		}
+		scopes := "openid execute goauthy.connections.read goauthy.connections.use"
+		if token == "smoke-no-use-token" {
+			scopes = "openid execute goauthy.connections.read goauthy.read"
+		}
+		if token == "smoke-no-connections-audience-token" {
+			audiences = []string{serviceAudience}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "sub": subject, "iss": issuer, "aud": audiences, "client_id": client, "scope": scopes, "token_type": "Bearer", "exp": time.Now().Add(time.Minute).Unix()})
 	})
 	mux.HandleFunc("GET /userinfo", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer smoke-access-token" {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token != "smoke-access-token" && token != "smoke-nonmember-token" && token != "smoke-wrong-user-token" && token != "smoke-wrong-audience-token" && token != "smoke-wrong-client-token" && token != "smoke-no-use-token" && token != "smoke-no-connections-audience-token" {
 			http.Error(w, "invalid token", 401)
 			return
 		}
 		log.Print("validated userinfo")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"sub":"smoke-user"}`)
+		subject := "smoke-user"
+		if token == "smoke-nonmember-token" || token == "smoke-wrong-user-token" {
+			subject = "nonmember-user"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"sub": subject})
 	})
-	return mux
+	return personalFixture(mux)
 }
 
 func initialize(dir string) error {
@@ -161,8 +205,20 @@ func initialize(dir string) error {
 		"ca.pem":         pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		"key.pem":        pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: rawKey}),
 		"client-secret":  []byte("smoke-client-secret"),
-		"providers.json": []byte(`{"default":"smoke","providers":[{"id":"smoke","kind":"openai-compatible","base_url":"https://smoke-issuer:8443/model/v1","model":"smoke"}]}`),
-		"service.json":   []byte(`{"issuer":"` + issuer + `","introspection_url":"` + issuer + `/introspect","userinfo_url":"` + issuer + `/userinfo","client_id":"beesuh-smoke","client_secret_file":"/config/client-secret","audience":"beesuh-smoke","required_scopes":["openid","execute"],"goauthy":{"resource":"` + issuer + `/connections","providers":{"smoke-provider":"smoke"}}}`),
+		"providers.json": []byte(`{"default":"opencode","providers":[{"id":"opencode","kind":"openai-compatible","base_url":"https://smoke-issuer:8443/inference/go/openai/v1","model":"` + fakeModel + `"}]}`),
+		"service.json":   []byte(`{"issuer":"` + issuer + `","introspection_url":"` + issuer + `/introspect","userinfo_url":"` + issuer + `/userinfo","client_id":"beesuh-smoke","client_secret_file":"/config/client-secret","audience":"` + serviceAudience + `","required_scopes":["openid","execute"],"goauthy":{"resource":"` + resource + `","providers":{"smoke-provider":"opencode"}}}`),
+		"grant-app-key":  []byte(fixtureAppKey),
+	}
+	for _, partial := range []bool{false, true} {
+		name := "shared-service.json"
+		if partial {
+			name = "partial-service.json"
+		}
+		data, err := sharedFixtureConfig(files["service.json"], partial)
+		if err != nil {
+			return err
+		}
+		files[name] = data
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {

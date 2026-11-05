@@ -99,6 +99,13 @@ the document specifies token audiences/scopes, request/response shapes and denia
 cases. Select a release containing this profile and verify its image digest and
 actual owner registrations before deployment. The first Operable integration
 does not advertise cancellation or streaming.
+The single-constant-workspace profile uses explicit per-operation
+`forward_headers`: GET binds `x-organization-id`, and chat/selection POST binds
+`content-type` and `x-organization-id`. With exactly one validated constant
+context, `X-Workspace-ID` can be omitted; organization and matching body/query
+workspace remain required. Omitting the new field retains v0.5's required
+workspace header and fixed digest lists. See the linked contract before changing
+Exposure forwarding; no additional nginx hop is required.
 
 ```sh
 go run ./cmd/beesuh -listen 127.0.0.1:8080 \

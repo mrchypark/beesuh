@@ -198,7 +198,7 @@ func fixtureHeaderDigest(operation string, contentTypes []string) (string, bool)
 		}
 		preimage = "content-type:" + contentTypes[0] + "\n"
 	}
-	return fixtureDigest([]byte(preimage + "x-organization-id:" + sharedOrganization + "\nx-workspace-id:" + sharedWorkspace + "\n")), true
+	return fixtureDigest([]byte(preimage + "x-organization-id:" + sharedOrganization + "\n")), true
 }
 
 func fixtureAction(operation string) string {
@@ -232,7 +232,11 @@ func sharedFixtureConfig(base []byte, partial bool) ([]byte, error) {
 		if partial && operation == "run_execute" {
 			continue
 		}
-		operations[operation] = map[string]any{"capability_id": "bee." + operation, "capability_version": 1, "contract_digest": fixtureContract, "action_id": fixtureAction(operation)}
+		headers := []string{"x-organization-id"}
+		if operation == "run_execute" || operation == "connection_select" {
+			headers = []string{"content-type", "x-organization-id"}
+		}
+		operations[operation] = map[string]any{"capability_id": "bee." + operation, "capability_version": 1, "contract_digest": fixtureContract, "action_id": fixtureAction(operation), "forward_headers": headers}
 	}
 	config["shared"] = map[string]any{
 		"grant_url": issuer, "app_key_file": "/config/grant-app-key", "grant_credential_hint_audience": grantHintAudience,

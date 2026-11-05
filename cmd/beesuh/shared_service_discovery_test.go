@@ -80,6 +80,10 @@ func TestSharedServiceDiscoveryKeepsModelConsentAndWorkspaceOwnership(t *testing
 	sharedConfig := sharedTestConfig(t)
 	for i := range sharedConfig.Contexts {
 		delete(sharedConfig.Contexts[i].Operations, "run_cancel")
+		for operation, pin := range sharedConfig.Contexts[i].Operations {
+			pin.ForwardHeaders = json.RawMessage(`["content-type","x-organization-id"]`)
+			sharedConfig.Contexts[i].Operations[operation] = pin
+		}
 	}
 	delete(sharedConfig.Contexts[1].Operations, "run_execute")
 	setSharedTestConfig(t, s, sharedConfig)
@@ -108,6 +112,26 @@ func TestSharedServiceDiscoveryKeepsModelConsentAndWorkspaceOwnership(t *testing
 		return out
 	}
 	selection := `{"collection_id":"models","connection_id":"mine","grant_id":"approved"}`
+	for _, scenario := range []string{"absent", "empty", "duplicate", "wrong", "body-mismatch"} {
+		req := sharedTestRequest("POST", "/v1/chat", `{"workspace_id":"work-a"}`, "work-a")
+		switch scenario {
+		case "absent":
+			req.Header.Del("X-Workspace-ID")
+		case "empty":
+			req.Header.Set("X-Workspace-ID", "")
+		case "duplicate":
+			req.Header.Add("X-Workspace-ID", "work-a")
+		case "wrong":
+			req.Header.Set("X-Workspace-ID", "unknown")
+		case "body-mismatch":
+			req.Header.Set("X-Workspace-ID", "work-b")
+		}
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, req)
+		if out.Code != 403 || len(check.calls) != 0 || metadata.Load() != 0 || deliveries.Load() != 0 || dispatches.Load() != 0 {
+			t.Fatalf("excluded selector bypassed verification: %s status=%d", scenario, out.Code)
+		}
+	}
 	for _, path := range []string{"/v1/chat", "/v1/connections"} {
 		req := sharedTestRequest("POST", path, `{"workspace_id":"work-a"}`, "work-a")
 		req.Header.Del("Content-Type")

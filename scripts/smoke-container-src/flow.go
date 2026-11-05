@@ -38,6 +38,7 @@ const flowState = "/tmp/smoke-selection.json"
 
 type sharedSelectors struct{ organization, workspace string }
 type fixtureContentTypesKey struct{}
+type fixtureWorkspaceHeadersKey struct{}
 
 func (f flow) makeRequest(method, path, body, token string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(f.ctx, method, f.base+path, strings.NewReader(body))
@@ -49,7 +50,15 @@ func (f flow) makeRequest(method, path, body, token string) (*http.Request, erro
 	}
 	if selectors, ok := f.ctx.Value(sharedSelectors{}).(sharedSelectors); ok {
 		req.Header.Set("X-Organization-ID", selectors.organization)
-		req.Header.Set("X-Workspace-ID", selectors.workspace)
+		if selectors.workspace != "" {
+			req.Header.Set("X-Workspace-ID", selectors.workspace)
+		}
+	}
+	if values, ok := f.ctx.Value(fixtureWorkspaceHeadersKey{}).([]string); ok {
+		req.Header.Del("X-Workspace-ID")
+		for _, value := range values {
+			req.Header.Add("X-Workspace-ID", value)
+		}
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -459,7 +468,7 @@ type sharedSaved struct {
 
 func (f flow) sharedFlow(phase string) error {
 	request := func(method, path, body string, status int) ([]byte, error) {
-		return f.sharedRequest(method, path, body, "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", status)
+		return f.sharedRequest(method, path, body, "smoke-access-token", sharedOrganization, "", "allow", status)
 	}
 	// A real authenticated request establishes readiness of this exact Bee image.
 	for {
@@ -518,7 +527,7 @@ func (f flow) sharedFlow(phase string) error {
 		if s.ID == "" || s.Workspace != sharedWorkspace || s.State != "ready" {
 			return fmt.Errorf("shared selection lost server workspace ownership")
 		}
-		data, err = f.sharedRequestContentTypes("POST", "/v1/chat", chat(s, "shared-success", "shared workspace hello"), "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", []string{"application/json; charset=utf-8"}, 200)
+		data, err = f.sharedRequestContentTypes("POST", "/v1/chat", chat(s, "shared-success", "shared workspace hello"), "smoke-access-token", sharedOrganization, "", "allow", []string{"application/json; charset=utf-8"}, 200)
 		if err != nil {
 			return err
 		}
@@ -529,6 +538,26 @@ func (f flow) sharedFlow(phase string) error {
 			return fmt.Errorf("shared model output missing")
 		}
 		saved.Models, saved.Deliveries = before.Models+1, before.Deliveries+1
+		if err := f.counts(saved.Models, saved.Deliveries); err != nil {
+			return err
+		}
+		// A matching optional selector is validated but excluded from the digest.
+		if _, err := f.sharedRequest("GET", "/v1/providers", "", "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", 200); err != nil {
+			return err
+		}
+		for _, values := range [][]string{{""}, {sharedWorkspace, sharedWorkspace}, {"foreign-workspace"}} {
+			local := f
+			local.ctx = context.WithValue(f.ctx, fixtureWorkspaceHeadersKey{}, values)
+			if _, err := local.sharedRequest("POST", "/v1/chat", chat(s, "invalid-workspace-header", "must not dispatch"), "smoke-access-token", sharedOrganization, "", "allow", 403); err != nil {
+				return err
+			}
+			if err := f.counts(saved.Models, saved.Deliveries); err != nil {
+				return err
+			}
+		}
+		if _, err := request("GET", "/v1/history?workspace_id=foreign-workspace&session_key=smoke-session", "", 403); err != nil {
+			return err
+		}
 		if err := f.counts(saved.Models, saved.Deliveries); err != nil {
 			return err
 		}

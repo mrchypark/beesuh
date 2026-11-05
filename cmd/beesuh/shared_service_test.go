@@ -216,7 +216,7 @@ func TestSharedServiceSnapshotIsImmutableAndRechecks(t *testing.T) {
 
 func TestSharedSnapshotSelectorHeaderDigest(t *testing.T) {
 	req := sharedTestRequest("GET", "/v1/providers", "", "work-a")
-	_, base, err := sharedSnapshot(req, "operable", "cypark-default")
+	_, base, err := sharedSnapshot(req, "operable", "cypark-default", nil)
 	if err != nil || base.ForwardedHeaderDigest != "sha256:818f1c996cee0ceea1860229107f8d7ccc367853d0e5c6d822962790a9705363" {
 		t.Fatalf("candidate owner header preimage: %s %v", base.ForwardedHeaderDigest, err)
 	}
@@ -225,12 +225,12 @@ func TestSharedSnapshotSelectorHeaderDigest(t *testing.T) {
 	req.Header.Set("X-Workspace-ID", "raw-selector-is-not-the-binding")
 	req.Header.Set("X-Unrelated", "excluded")
 	req.Header.Set("Content-Type", "text/plain")
-	_, same, err := sharedSnapshot(req, "operable", "cypark-default")
+	_, same, err := sharedSnapshot(req, "operable", "cypark-default", nil)
 	if err != nil || same.ForwardedHeaderDigest != base.ForwardedHeaderDigest {
 		t.Fatal("raw request headers or Authorization changed the server-binding digest")
 	}
 	for _, binding := range [][2]string{{"another-org", "cypark-default"}, {"operable", "another-workspace"}} {
-		_, changed, err := sharedSnapshot(req, binding[0], binding[1])
+		_, changed, err := sharedSnapshot(req, binding[0], binding[1], nil)
 		if err != nil || changed.ForwardedHeaderDigest == base.ForwardedHeaderDigest {
 			t.Fatalf("server selector change was not bound: %v %v", binding, err)
 		}
@@ -248,7 +248,7 @@ func TestSharedSnapshotBindsExactJSONContentType(t *testing.T) {
 		} {
 			req := sharedTestRequest("POST", route.path, route.body, "work-a")
 			req.Header.Set("Content-Type", tc.value)
-			_, actual, err := sharedSnapshot(req, "org", "work-a")
+			_, actual, err := sharedSnapshot(req, "org", "work-a", nil)
 			if err != nil || actual.ForwardedHeaderDigest != tc.digest {
 				t.Fatalf("%s Content-Type %q: %s %v", route.path, tc.value, actual.ForwardedHeaderDigest, err)
 			}
@@ -256,7 +256,7 @@ func TestSharedSnapshotBindsExactJSONContentType(t *testing.T) {
 		req := sharedTestRequest("POST", route.path, route.body, "work-a")
 		value := `Application/JSON; profile="a,b"`
 		req.Header.Set("Content-Type", value)
-		_, actual, err := sharedSnapshot(req, "org", "work-a")
+		_, actual, err := sharedSnapshot(req, "org", "work-a", nil)
 		sum := sha256.Sum256([]byte("content-type:" + value + "\nx-organization-id:org\nx-workspace-id:work-a\n"))
 		if err != nil || actual.ForwardedHeaderDigest != "sha256:"+hex.EncodeToString(sum[:]) {
 			t.Fatalf("exact mixed-case/quoted parameter value was not retained: %s %v", actual.ForwardedHeaderDigest, err)
@@ -304,7 +304,7 @@ func TestSharedServiceRoutesAndSnapshotBounds(t *testing.T) {
 			query = "?workspace_id=work-a"
 		}
 		req := sharedTestRequest(route.method, path+query, body, "work-a")
-		op, snap, err := sharedSnapshot(req, "org", "work-a")
+		op, snap, err := sharedSnapshot(req, "org", "work-a", nil)
 		if err != nil || op != route.operation {
 			t.Fatalf("route %s: %s %v", route.operation, op, err)
 		}
@@ -313,7 +313,7 @@ func TestSharedServiceRoutesAndSnapshotBounds(t *testing.T) {
 		}
 	}
 	req := sharedTestRequest("POST", "/v1/chat", strings.Repeat("x", sharedBodyLimit+1), "work-a")
-	if _, _, err := sharedSnapshot(req, "org", "work-a"); err == nil {
+	if _, _, err := sharedSnapshot(req, "org", "work-a", nil); err == nil {
 		t.Fatal("oversized snapshot accepted")
 	}
 	longToken := "Bearer " + strings.Repeat("a", 1024)
@@ -538,5 +538,139 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 	denied.Store(true)
 	if err := s.authorize(req.Context(), p); !errors.Is(err, beesuh.ErrForbidden) {
 		t.Fatalf("PDP outage allowed: %v", err)
+	}
+}
+
+func TestSharedForwardHeaderConfiguration(t *testing.T) {
+	for _, raw := range []string{`null`, `{}`, `"x-test"`, `[1]`, `["Authorization"]`, `["authorization"]`, `["x-b","x-a"]`, `["x-a","x-a"]`, `[""]`, `["x bad"]`, `["connection"]`, `["cookie"]`} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := sharedTestConfig(t)
+			pin := cfg.Contexts[0].Operations["run_execute"]
+			pin.ForwardHeaders = json.RawMessage(raw)
+			cfg.Contexts[0].Operations["run_execute"] = pin
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := &serviceConfig{Shared: data}
+			if s.configureShared() == nil {
+				t.Fatal("invalid header metadata accepted")
+			}
+		})
+	}
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`[]`), json.RawMessage(`["content-type","x-organization-id"]`)} {
+		names, ok := sharedForwardHeaders(raw)
+		if !ok || (names == nil) != (raw == nil) {
+			t.Fatalf("metadata distinction lost: %s %#v", raw, names)
+		}
+	}
+}
+
+func TestSharedExplicitHeaderSnapshot(t *testing.T) {
+	body := `{"workspace_id":"work-a","message":"hi"}`
+	req := sharedTestRequest("POST", "/v1/chat", body, "work-a")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("X-Test", " raw\tvalue ")
+	req.Header.Set("X-Unknown", "ignored")
+	names := []string{"content-type", "x-absent", "x-organization-id", "x-test"}
+	_, snap, err := sharedSnapshot(req, "org", "work-a", names)
+	want := "sha256:cd02ddd40739d5e00e8c73c37c3bad9d0602ad3af676258fe2fe8dcbae73a978"
+	if err != nil || snap.ForwardedHeaderDigest != want || snap.BodyDigest != grantpolicy.Digest([]byte(body)) {
+		t.Fatalf("explicit preimage: %+v %v", snap, err)
+	}
+	_, empty, err := sharedSnapshot(req, "org", "work-a", []string{})
+	if err != nil || empty.ForwardedHeaderDigest != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Fatal("empty metadata did not hash empty preimage")
+	}
+	for _, values := range [][]string{{"a", "b"}, {"bad\rvalue"}, {"bad\x00value"}, {string([]byte{255})}} {
+		req.Header["X-Test"] = values
+		if _, _, err := sharedSnapshot(req, "org", "work-a", names); err == nil {
+			t.Fatalf("unsafe values accepted: %q", values)
+		}
+	}
+}
+
+func TestSharedImplicitWorkspaceRequiresExplicitConstantContract(t *testing.T) {
+	for _, scenario := range []string{"allowed", "empty-list", "present-valid", "legacy", "multiple", "declared-workspace", "wrong-resource", "wrong-type", "wrong-evidence", "named-evidence", "wrong-org", "no-org", "empty", "duplicate", "wrong-workspace", "body-mismatch", "query-mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, _, _, _ := sharedOAuthService(t)
+			cfg := sharedTestConfig(t)
+			cfg.Contexts = cfg.Contexts[:1]
+			for op, pin := range cfg.Contexts[0].Operations {
+				pin.ForwardHeaders = json.RawMessage(`["content-type","x-organization-id"]`)
+				if scenario == "empty-list" {
+					pin.ForwardHeaders = json.RawMessage(`[]`)
+				}
+				if scenario == "legacy" {
+					pin.ForwardHeaders = nil
+				}
+				if scenario == "declared-workspace" {
+					pin.ForwardHeaders = json.RawMessage(`["x-workspace-id"]`)
+				}
+				cfg.Contexts[0].Operations[op] = pin
+			}
+			switch scenario {
+			case "multiple":
+				other := cfg.Contexts[0]
+				other.WorkspaceID = "work-b"
+				cfg.Contexts = append(cfg.Contexts, other)
+			case "wrong-resource":
+				cfg.Contexts[0].ResourceID = "other"
+				cfg.Contexts[0].ResourceEvidence.CanonicalValue = "other"
+			case "wrong-type":
+				cfg.Contexts[0].ResourceType = "item"
+			case "wrong-evidence":
+				cfg.Contexts[0].ResourceEvidence.Kind = "queryScalar"
+				cfg.Contexts[0].ResourceEvidence.Name = "workspace_id"
+			case "named-evidence":
+				cfg.Contexts[0].ResourceEvidence.Name = "workspace_id"
+			}
+			setSharedTestConfig(t, s, cfg)
+			check := &sharedChecker{}
+			for _, binding := range s.shared.bindings {
+				binding.policy = check
+			}
+			body := `{"workspace_id":"work-a","message":"hi"}`
+			if scenario == "body-mismatch" {
+				body = `{"workspace_id":"work-b","message":"hi"}`
+			}
+			req := sharedTestRequest("POST", "/v1/chat", body, "work-a")
+			req.Header.Del("X-Workspace-ID")
+			switch scenario {
+			case "present-valid":
+				req.Header.Set("X-Workspace-ID", "work-a")
+			case "wrong-org":
+				req.Header.Set("X-Organization-ID", "other")
+			case "no-org":
+				req.Header.Del("X-Organization-ID")
+			case "empty":
+				req.Header.Set("X-Workspace-ID", "")
+			case "duplicate":
+				req.Header["X-Workspace-ID"] = []string{"work-a", "work-a"}
+			case "wrong-workspace":
+				req.Header.Set("X-Workspace-ID", "work-b")
+			case "query-mismatch":
+				req = sharedTestRequest("GET", "/v1/runs/r?workspace_id=work-b", "", "work-a")
+				req.Header.Del("X-Workspace-ID")
+			}
+			beforeHeaders := req.Header.Clone()
+			beforeURI, beforeURL := req.RequestURI, req.URL.String()
+			p, err := s.authenticate(req)
+			allowed := scenario == "allowed" || scenario == "empty-list" || scenario == "present-valid"
+			if allowed {
+				if err != nil || p.WorkspaceID != "work-a" || len(check.calls) != 1 {
+					t.Fatalf("constant selection failed: %+v %v", p, err)
+				}
+			} else if err == nil || len(check.calls) != 0 {
+				t.Fatalf("unsafe selection reached policy: %v calls=%d", err, len(check.calls))
+			}
+			if !reflect.DeepEqual(beforeHeaders, req.Header) || req.RequestURI != beforeURI || req.URL.String() != beforeURL {
+				t.Fatal("request metadata changed")
+			}
+			got, readErr := io.ReadAll(req.Body)
+			if readErr != nil || (scenario != "query-mismatch" && string(got) != body) {
+				t.Fatal("body changed")
+			}
+		})
 	}
 }

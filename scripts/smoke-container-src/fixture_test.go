@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -226,9 +227,9 @@ func TestGrantCredentialGoldenHash(t *testing.T) {
 
 func TestOperationForwardedHeaderDigests(t *testing.T) {
 	// Hashes independently computed from the exact lower-sorted LF preimages.
-	const selectors = "sha256:63b6196fc43c2567e4e3105d288c284ff24f4109146a3322f2b8d8d2279a9774"
-	const jsonHeaders = "sha256:093bc306da9e5a608f43c3ecf837898fb96159a87a29f31c9c3b34334069c9d4"
-	const charsetHeaders = "sha256:a1d2b89749f3f14a7a44d8a1bbba664c5946c0df36b55d60750d2f86e06cb8aa"
+	const selectors = "sha256:37f11aec5298a1a3c40d822dafedc53ec413dd6da67144ee80a98f53142f2c3c"
+	const jsonHeaders = "sha256:01f8019d762232addd7264db9354bd1609fe65679c20096d6f8c971eb0cd2880"
+	const charsetHeaders = "sha256:d9500b9751dc32207195b57b1f21d7a7343beaca1e40931d9487ab0a165caadc"
 	for _, tc := range []struct {
 		operation    string
 		contentTypes []string
@@ -274,13 +275,13 @@ func TestSharedExpectationUsesOriginalContentType(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&expectation); err != nil || len(expectation.ContentTypes) != 1 || expectation.ContentTypes[0] != raw {
 				t.Fatal("control expectation lost the original Bee HTTP Content-Type")
 			}
-		} else if calls != 2 || r.URL.Path != "/v1/chat" || r.Header.Get("Content-Type") != raw {
+		} else if calls != 2 || r.URL.Path != "/v1/chat" || r.Header.Get("Content-Type") != raw || len(r.Header.Values("X-Workspace-ID")) != 0 {
 			t.Fatal("business transport changed the original raw Content-Type")
 		}
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
 	f := flow{context.Background(), client, "http://fixture-bee.invalid"}
-	_, err := f.sharedRequestContentTypes("POST", "/v1/chat", `{"workspace_id":"smoke-shared"}`, "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", []string{raw}, 200)
+	_, err := f.sharedRequestContentTypes("POST", "/v1/chat", `{"workspace_id":"smoke-shared"}`, "smoke-access-token", sharedOrganization, "", "allow", []string{raw}, 200)
 	if err != nil || calls != 2 {
 		t.Fatalf("original Content-Type binding check: calls=%d error=%v", calls, err)
 	}
@@ -294,7 +295,7 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 			policy.expected = fixtureExpectation{Method: "POST", Path: "/v1/chat", Body: body, Token: "smoke-access-token", Mode: "allow", ContentTypes: []string{"application/json; charset=utf-8"}}
 			wire := map[string]any{
 				"bodyDigest": fixtureDigest([]byte(body)), "bodyLength": len(body), "canonicalPath": "/v1/chat", "canonicalQuery": "",
-				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": "sha256:a1d2b89749f3f14a7a44d8a1bbba664c5946c0df36b55d60750d2f86e06cb8aa", "method": "POST",
+				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": "sha256:d9500b9751dc32207195b57b1f21d7a7343beaca1e40931d9487ab0a165caadc", "method": "POST",
 				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContract,
 				"pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider", "providerCredentialDigest": fixtureCredentialDigest("Bearer smoke-access-token"),
 				"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience},
@@ -366,7 +367,8 @@ func TestSharedFixtureOperationMetadata(t *testing.T) {
 					ResourceType string            `json:"resource_type"`
 					Evidence     map[string]string `json:"resource_evidence"`
 					Operations   map[string]struct {
-						Action string `json:"action_id"`
+						Action         string   `json:"action_id"`
+						ForwardHeaders []string `json:"forward_headers"`
 					} `json:"operations"`
 				} `json:"contexts"`
 			} `json:"shared"`
@@ -390,6 +392,13 @@ func TestSharedFixtureOperationMetadata(t *testing.T) {
 			t.Fatal("partial mapping does not omit only run_execute")
 		}
 		for operation, pin := range context.Operations {
+			wantHeaders := []string{"x-organization-id"}
+			if operation == "run_execute" || operation == "connection_select" {
+				wantHeaders = []string{"content-type", "x-organization-id"}
+			}
+			if !reflect.DeepEqual(pin.ForwardHeaders, wantHeaders) {
+				t.Fatalf("%s forward_headers = %v, want %v", operation, pin.ForwardHeaders, wantHeaders)
+			}
 			want := "beesuh.run.read"
 			switch operation {
 			case "run_execute", "connection_select", "connection_revoke":

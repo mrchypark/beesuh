@@ -1,12 +1,13 @@
 # Shared-workspace HTTP service
 
-This source profile connects an OIDC-verified human request, server-owned
+This profile connects an OIDC-verified human request, server-owned
 organization/workspace registry, Grant authorization and an independently
 approved Goauthy `credential_delivery` connection. The intended model is
 `minimax-m3.1-flash` through the native `openai-compatible` HTTP provider at
 `https://opencode.ai/inference/go/openai/v1`. It does not
-start an OpenCode server. This document describes source behavior, not a verified
-live deployment or a published image containing the shared profile.
+start an OpenCode server. This document defines the shared-profile consumer
+contract. Check the selected release's source revision and image digest before
+deployment; this contract alone does not establish live integration readiness.
 
 ## Supplied owner packet (not live-verified)
 
@@ -246,6 +247,15 @@ the provider URL or the model name. Repeated checks bind the same request's
 method/path, canonical query, body hash/length and original credential digest.
 No bearer or allow-decision cache survives the request.
 
+For discovery, selection and execution, obtain a human token with `aud` containing
+both `OWNER_CONFIRMED_BEE_API_AUDIENCE` and
+`OWNER_CONFIRMED_CONNECTIONS_RESOURCE_AUDIENCE`, and `scope` containing `openid`,
+every configured `required_scopes` entry, `goauthy.connections.read` and
+`goauthy.connections.use`. Its `client_id` must equal
+`OWNER_CONFIRMED_CONSUMER`. The same registered confidential client may be reused;
+Bee provides no token-exchange endpoint. The Grant hint audience is a separate
+configuration binding, not an instruction to invent another access-token audience.
+
 | Operation key | UI request | Query/body |
 | --- | --- | --- |
 | `connection_options` | `GET /v1/connection-options` | No query/body |
@@ -257,6 +267,13 @@ No bearer or allow-decision cache survives the request.
 | `history_read` | `GET /v1/history` | Exactly `workspace_id`, `session_key` |
 | `run_read` | `GET /v1/runs/{request_id}` | Exactly `workspace_id` |
 | `run_cancel` | `POST /v1/runs/{request_id}/cancel` | Exactly `workspace_id`; no body |
+
+The first Operable integration covers connection discovery, selection and
+synchronous execution, with lookup/history enabled only when their pins are
+registered. It does not advertise cancellation or streaming. `run_cancel` is an
+optional server operation requiring its own registered pin and separate consumer
+validation; it cannot guarantee reversal of external effects. There is no SSE or
+WebSocket event endpoint.
 
 All routes require the headers above and their enabled operation pin. Query/body
 workspace must match the selected server workspace. Status and Compos routes
@@ -283,6 +300,11 @@ not a supported Bee query key. Chat and selection POSTs additionally require
 
    Store the returned Bee `id` for chat. Selection persists an immutable
    organization/user/workspace-scoped connection reference, not a usable key.
+   HTTP 201 returns the connection envelope, for example:
+
+   ```json
+   {"organization_id":"operable","id":"RETURNED_BEE_CONNECTION_ID","user_id":"VERIFIED_USER_ID","workspace_id":"cypark-default","kind":"provider","state":"ready","generation":1}
+   ```
 4. POST `/v1/chat` with the same headers:
 
    ```json
@@ -294,6 +316,40 @@ not a supported Bee query key. Chat and selection POSTs additionally require
      "message": "Hello"
    }
    ```
+
+   Chat waits for completion; it is not an asynchronous HTTP 202 submission.
+   A successful HTTP 200 response has this shape (generated IDs are placeholders):
+
+   ```json
+   {"provider":"minimax","request_id":"request-1","session_id":"SESSION_ID","message_id":"MESSAGE_ID","state":"succeeded","output":{"text":"Hello"}}
+   ```
+
+Run lookup returns HTTP 200 with `{"session_id":"","state":"running"}` while
+a stored run is active, the stored result after completion, or 404 if no row
+exists yet. A concurrent submission may not have created its row when polled.
+History returns an array of the latest 200 journal entries in ascending sequence
+order, with `sequence`, `request_id`, `kind` and `payload`; it has no cursor and
+is not exclusively a chat-message array. Completed identical requests replay their
+stored result; conflicting reuse of a request ID returns 409.
+
+### Denial examples
+
+| Request condition | Consumer-visible result |
+| --- | --- |
+| Missing/invalid/expired human Bearer or required API audience/scope | Authentication fails; HTTP 401 |
+| Missing, duplicate or unknown org/workspace selector; omitted operation pin; Grant denies | Shared authorization fails; HTTP 403 |
+| Chat body or lookup/history query workspace differs from selected workspace | HTTP 403; no access to the other workspace |
+| Missing/malformed/non-JSON chat or selection Content-Type | HTTP 403 before Grant evaluation or credential delivery |
+| Missing connections audience/read/use scope, wrong consumer, revoked or mismatched consent | Connection discovery/selection or execution fails; no model dispatch |
+
+Authentication failures on runtime routes use HTTP 401/403 with
+`{"session_id":"","state":"failed","error":"authorization required"}`;
+this envelope has no `error_code`. Discovery/selection failures instead use
+`{"error":"connection unavailable"}` (401/403 for authentication/authorization,
+400 for invalid input, or 503 for other failures). Runtime errors after
+authentication use the result envelope and an `error_code`, for example HTTP 403
+with `{"session_id":"","state":"failed","error":"authorization required","error_code":"forbidden"}`.
+Do not infer rollback from a failed or `uncertain` result.
 
 Execution rechecks identity/Grant and the current Goauthy grant's owner, consumer,
 resource, `credential_delivery` mode, generations, revisions, provider, expiry
@@ -335,13 +391,14 @@ Users may share an authorized workspace context while connection ownership and
 runtime data remain user-scoped. This does not grant access to another user's
 model connection or promise collaborative cross-user history.
 
-## Current functional evidence and blockers
+## Verification boundary and deployment prerequisites
 
 The source includes local protocol fixtures for repeated authorization, workspace
 isolation, policy denial, missing-operation denial and independent consent
 revocation. They are not actual Grant/learner/Exposure registration evidence;
-the golden wire artifact is not an owner acceptance result. No host Go command,
-test, build, image publication or live model call was run for this transplant.
+the golden wire artifact is not an owner acceptance result. Release CI and
+published-image smoke results must be checked at the selected revision; protocol
+fixtures do not establish live Grant, Goauthy or model-account availability.
 
 To exercise the real flow, owners still need to supply the actual catalog and
 capability pins, learner/resource registration, app-key provisioning and

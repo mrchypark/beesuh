@@ -19,7 +19,7 @@ import (
 	"github.com/mrchypark/rhiza"
 )
 
-// This exercises same-version process recovery from local durable state, not
+// This exercises local process recovery (optionally from an older seed binary), not
 // checkpoint restore or recovery after loss of the data directory.
 func TestSingleNodeDurableRecovery(t *testing.T) {
 	var calls atomic.Int32
@@ -59,7 +59,11 @@ func TestSingleNodeDurableRecovery(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 		t.Cleanup(cancel)
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSingleNodeDurableRecoveryHelper$", "-test.v")
+		binary := os.Args[0]
+		if phase == "seed" && os.Getenv("BEESUH_RECOVERY_SEED_BINARY") != "" {
+			binary = os.Getenv("BEESUH_RECOVERY_SEED_BINARY")
+		}
+		cmd := exec.CommandContext(ctx, binary, "-test.run=^TestSingleNodeDurableRecoveryHelper$", "-test.v")
 		cmd.Env = append(os.Environ(), "BEESUH_RECOVERY_PHASE="+phase, "BEESUH_RECOVERY_DIR="+dir, "BEESUH_RECOVERY_MODEL="+server.URL)
 		logPath := filepath.Join(dir, phase+".log")
 		log, err := os.Create(logPath)

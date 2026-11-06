@@ -5,7 +5,7 @@
 
 ## 런타임과 저장 경로
 
-현재 소스는 Rhiza v0.21.1(커밋 `66e2416b52e3d64aa86134b7b0c8b70c5ace88be`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
+현재 소스는 Rhiza v0.23.0(커밋 `f050d6e30f57718736c8c4fdb5edef777183bc05`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
 `NodeID`는 `beesuh`, `PeerAddr`는 `127.0.0.1:0`입니다. 피어 주소는 루프백의
 임시 포트이며 외부 서비스 주소로 사용하지 않습니다. `LocalArchive`와 `ObjStore`는
 설정하지 않습니다. 기본 `Local:false`는 단일 멤버 임베디드 voter 구성이며,
@@ -88,6 +88,10 @@ SIGKILL이나 전원 손실은 정상 종료 절차를 실행하지 못합니다
 현재 구성에는 원격 아카이브가 없습니다. 전체 데이터 볼륨이나 PVC를 잃으면
 현재 구성만으로 기록을 복구할 수 없습니다. 별도로 보존한 유효한 백업이 없다면
 빈 볼륨을 연결해도 이전 대화·실행 기록은 돌아오지 않습니다.
+같은 DataDir를 보존한 SIGKILL 후 재열기와 Pod 교체로 전체 `emptyDir`가 사라지는
+상황은 다릅니다. 후자는 미전송 마지막 배치뿐 아니라 모든 로컬 기록을 잃을 수
+있습니다. Operator 없는 단일 노드는 가능하지만 현재 바이너리에 object archive
+설정 경로가 연결되어 있지 않아 No-PVC object DR을 제공하지 않습니다.
 
 PVC 스냅샷은 정상 종료 절차를 거쳐 프로세스가 완전히 종료된 뒤에만 생성하세요.
 15초 경과나 Pod 삭제 요청만으로 종료 완료를 판단하지 마세요. 백업과 원본 볼륨은
@@ -95,8 +99,9 @@ PVC 스냅샷은 정상 종료 절차를 거쳐 프로세스가 완전히 종료
 주장하지 않습니다.
 
 기존 저장 형식이나 아카이브를 자동으로 이전하는 절차는 제공하지 않습니다.
-새 버전은 README의 업그레이드 안내에 따라 새 DataDir로 시작하고 기존 데이터,
-아카이브와 이전 바이너리는 보존하세요. 여기서 말하는 자동 이전 미지원은 기존
+v0.22.0 → v0.23.0의 보존된 DataDir 재열기는 아래 범위에서 검증했습니다.
+그 외 버전은 README의 업그레이드 안내를 확인하고 기존 데이터,
+아카이브와 이전 바이너리를 보존하세요. 여기서 말하는 자동 이전 미지원은 기존
 Rhiza 저장 형식의 변환에 관한 것으로, 런타임의 애플리케이션 스키마 migration
 호출과는 구분합니다. 기존 파일을 복사해 호환성이 확인되었다고 판단하지 마세요.
 근거: [README의 기존 Rhiza 데이터 업그레이드 안내](../README.md).
@@ -140,21 +145,10 @@ init은 shell 없이 `/usr/local/bin/beesuh -storage-init -data-dir /data/beesuh
 선택적으로 초기화 명령을 실행하려면 기존 writer를 완전히 중지하고 동일 데이터
 루트를 지정하세요. `runtime.lock`을 삭제해 실행을 강제하지 마세요.
 
-별도의 [Local init 공식 안내](https://github.com/mrchypark/rhiza/blob/66e2416b52e3d64aa86134b7b0c8b70c5ace88be/docs/local-init-container-recovery.md)는
-`Local:true`, object store와 `BeforeAck`를 사용한 실제 앱 소유 Open/Close 예제입니다.
-PVC를 허용한다는 사실이 아카이브 없는 모든 구성의 복구 계약을 뜻하지는 않습니다. 원격 복구 안내는
-향후 앱이 양쪽 실행 모드에 동일한 아카이브 설정·식별자·자격증명을 구성할 때만
-적용됩니다. `BeforeAck`의 아카이브 내구성과 `Async`의 손실 구간도 그 별도 구성의
-조건이며 현재 Beesuh에는 적용하지 않습니다. object storage나 PVC 없는 모드를 추가하지 않습니다.
-
-이 안내는 Kubernetes 배포·fencing·실제 클라우드 provider를 검증하지 않았다고
-명시합니다. [v0.21.1 릴리스](https://github.com/mrchypark/rhiza/releases/tag/v0.21.1)도
-S3 `TestEmbeddedObjectStorageCheckpointAndTailTotalLoss`의
-`Local maintenance control changed during read` 오류가 미해결임을 공개합니다
-([원본 job](https://github.com/mrchypark/rhiza/actions/runs/40697711614/job/122848820051)).
-이는 현재 Beesuh의 아카이브 없는 경로 밖의 실패이며 Beesuh 재현이나 원격 복구
-보장을 입증하지 않습니다. v0.21.1은 문서 패치이며 runtime과 아카이브 형식은
-v0.21.0과 같습니다. v0.21 저장 계약을 설명할 뿐 별도 형식 변경을 추가하지 않습니다.
+Rhiza SDK의 object-store 기능은 Beesuh 바이너리의 설정 기능과 구분해야 합니다.
+이번 업그레이드는 아카이브 연결이나 PVC 없는 복구 기능을 추가하지 않습니다.
+이번 브랜치 밖에 보존된 기존 DR WIP는 이번 변경에 포함하지 않으며,
+BeforeAck/RPO0나 분산 fencing을 새 릴리스 조건으로 요구하지 않습니다.
 
 단일 replica와 볼륨 접근 모드는 fencing이 아닙니다. Pod 강제 삭제만으로 이전
 프로세스의 종료를 판단하지 마세요. 교체 writer를 시작하기 전에 이전 writer가
@@ -163,15 +157,16 @@ v0.21.0과 같습니다. v0.21 저장 계약을 설명할 뿐 별도 형식 변�
 ## 검증 범위
 
 이 문서는 현재 소스와 커밋이 고정된 Rhiza 공식 문서를 대조한 운영 안내입니다.
-Rhiza 모듈은 `v0.21.1`로 확인했습니다. 전체 패키지(`./...`)의
-`go test -count=1 -timeout=20m`, `go test -race -count=1 -timeout=20m`,
-`go vet`가 모두 종료 코드 0으로 통과했습니다.
-테스트는 새 디렉터리의 초기화와 반복 실행, 앱 테이블을 만들지 않는 초기화,
-기존 writer와의 잠금 충돌, 잘못된 CLI 옵션 및 초기화 실패 후 잠금 해제를 검증합니다.
-로컬 임시 데이터 디렉터리에서는 실행 결과를 저장한 뒤 런타임 종료 → init →
-런타임 재열기를 거쳐 기존 결과를 반환하고 모델 요청을 반복하지 않는 것도 확인했습니다.
-이는 보존된 로컬 데이터 테스트이며 Kubernetes PVC 복구 시험은 아닙니다.
-`kubectl kustomize deploy/kubernetes`의 오프라인 렌더링도 통과했습니다.
+Rhiza 모듈은 `v0.23.0`입니다. 후보 커밋
+`3da2ddc8b153128d20e3b44533caad823dfdc58d`의
+[CI 42122655777](https://github.com/mrchypark/beesuh/actions/runs/42122655777)에서
+gofmt, vet, 전체 일반·race 테스트, Darwin arm64 CGo-free 빌드와
+linux/amd64 Docker 빌드·스모크가 통과했습니다.
+별도 교차 버전 검사는 v0.22.0에서 실행·history·session을 만든 뒤 SIGKILL하고,
+보존된 DataDir를 v0.23.0으로 재열어 중복 모델 호출 없는 결과 재사용과
+대화 계속하기를 확인했습니다. 기존 connection·cancellation·recovery-fence
+레코드의 교차 버전 검증이나 다운그레이드 검증은 아닙니다.
+상세 범위는 [v0.23.0 평가](rhiza-0.23.0-assessment.md)를 참고하세요.
 
 Docker CI는 동일 볼륨을 사용하는 init과 메인 실행 및 TLS 인증을 검사합니다.
 해당 버전의 실제 검사 결과는 릴리스 CI와 릴리스 노트에서 확인하세요.

@@ -470,11 +470,54 @@ func TestSharedServiceHTTPIsolationUsesRuntimeChecks(t *testing.T) {
 // This is a protocol fixture, not a real Grant/learner registration proof.
 func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 	s, _, _, _ := sharedOAuthService(t)
+	cfg := sharedTestConfig(t)
+	binding := cfg.Contexts[0]
+	pin := binding.Operations["run_execute"]
+	capability := map[string]any{
+		"capabilityId": pin.CapabilityID, "version": pin.CapabilityVersion, "enabled": true,
+		"accessMode": "authorized", "method": "POST", "pathTemplate": "/v1/chat", "actionId": pin.ActionID,
+		"resource": map[string]any{"type": binding.ResourceType, "id": map[string]string{"kind": "constant", "value": binding.ResourceID}},
+		"query":    map[string]string{"mode": "none"},
+		"request":  map[string]any{"body": "json", "maxBytes": 256 << 10, "forwardHeaders": []string{"content-type", "x-organization-id", "x-workspace-id"}},
+		"response": map[string]any{"maxBytes": 32768, "forwardHeaders": []string{}, "redirects": "deny"},
+	}
+	// ASCII-only fixture: encoding/json sorts map keys without changing these strings.
+	contractJSON, err := json.Marshal(capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin.ContractDigest = grantpolicy.Digest(contractJSON)
+	capability["contractDigest"] = pin.ContractDigest
 	var mu sync.Mutex
 	var nonces []string
 	var denied atomic.Bool
+	var revision atomic.Int64
+	revision.Store(7)
+	var catalogCalls atomic.Int64
+	// Owner-specification fixture; no supplier wire-v2 golden was provided.
 	pdp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v2/http-capabilities/decide" || r.Header.Get("Authorization") != "Bearer opaque-human-token" || r.Header.Get("X-Organization-ID") != "org" || r.Header.Get("X-Grant-App-Auth-Key") != "fixture-app-key" {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v2/http-capabilities/catalog/beesuh" {
+			catalogCalls.Add(1)
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Organization-ID") != "" || r.Header.Get("X-Grant-App-Auth-Key") != "fixture-app-key" {
+				t.Error("catalog must use only app authentication")
+				w.WriteHeader(403)
+				return
+			}
+			if denied.Load() {
+				w.WriteHeader(503)
+				return
+			}
+			now := time.Now().UTC()
+			json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 1, "authorizationMode": "user", "pepPolicyRevision": revision.Load(),
+				"providerId": binding.ProviderID, "pepClientId": binding.PEPClientID,
+				"generation": binding.CatalogGeneration, "catalogDigest": binding.CatalogDigest,
+				"issuedAt": now, "expiresAt": now.Add(30 * time.Second),
+				"capabilities": []any{capability},
+			})
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/http-capabilities/decide" || r.Header.Get("Authorization") != "Bearer opaque-human-token" || r.Header.Get("X-Organization-ID") != "org" || r.Header.Get("X-Grant-App-Auth-Key") != "fixture-app-key" {
 			t.Error("incorrect policy request")
 			w.WriteHeader(403)
 			return
@@ -486,6 +529,13 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 		var in map[string]json.RawMessage
 		if json.NewDecoder(r.Body).Decode(&in) != nil {
 			w.WriteHeader(400)
+			return
+		}
+		var wireVersion uint64
+		var actualRevision int64
+		if json.Unmarshal(in["wireVersion"], &wireVersion) != nil || wireVersion != 2 || json.Unmarshal(in["pepPolicyRevision"], &actualRevision) != nil || actualRevision != revision.Load() {
+			t.Error("decision did not use the current catalog revision and wire version")
+			w.WriteHeader(403)
 			return
 		}
 		var nonce string
@@ -510,9 +560,6 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 		json.NewEncoder(w).Encode(in)
 	}))
 	defer pdp.Close()
-	cfg := sharedTestConfig(t)
-	binding := cfg.Contexts[0]
-	pin := binding.Operations["run_execute"]
 	client, err := grantpolicy.New(grantpolicy.Config{BaseURL: pdp.URL, AllowPrivateHTTP: true, AppKeyFile: cfg.AppKeyFile, OrganizationID: "org", ProviderID: binding.ProviderID, PEPClientID: binding.PEPClientID, CatalogGeneration: binding.CatalogGeneration, CatalogDigest: binding.CatalogDigest, Operations: map[string]grantpolicy.Binding{"run_execute": {CapabilityID: pin.CapabilityID, CapabilityVersion: pin.CapabilityVersion, ContractDigest: pin.ContractDigest, ActionID: pin.ActionID, ResourceType: binding.ResourceType, ResourceID: binding.ResourceID, ResourceEvidence: binding.ResourceEvidence}}})
 	if err != nil {
 		t.Fatal(err)
@@ -526,6 +573,7 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 	if err := s.authorize(req.Context(), p); err != nil {
 		t.Fatal(err)
 	}
+	revision.Store(8)
 	req2 := sharedTestRequest("POST", "/v1/chat", `{"workspace_id":"work-a","message":"different body"}`, "work-a")
 	if _, err := s.authenticate(req2); err != nil {
 		t.Fatal(err)
@@ -535,6 +583,9 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 		t.Errorf("fresh decisions missing: %v", nonces)
 	}
 	mu.Unlock()
+	if catalogCalls.Load() != 3 {
+		t.Errorf("catalog checks = %d, want 3", catalogCalls.Load())
+	}
 	denied.Store(true)
 	if err := s.authorize(req.Context(), p); !errors.Is(err, beesuh.ErrForbidden) {
 		t.Fatalf("PDP outage allowed: %v", err)
@@ -542,7 +593,7 @@ func TestSharedServiceRealClientFreshNonceAndDenial(t *testing.T) {
 }
 
 func TestSharedForwardHeaderConfiguration(t *testing.T) {
-	for _, raw := range []string{`null`, `{}`, `"x-test"`, `[1]`, `["Authorization"]`, `["authorization"]`, `["x-b","x-a"]`, `["x-a","x-a"]`, `[""]`, `["x bad"]`, `["connection"]`, `["cookie"]`} {
+	for _, raw := range []string{`null`, `{}`, `"x-test"`, `[1]`, `["Authorization"]`, `["authorization"]`, `["x-b","x-a"]`, `["x-a","x-a"]`, `[""]`, `["x bad"]`, `["connection"]`, `["cookie"]`, `["x-grant-app-auth-key"]`, `["x-grant-test"]`, `["x-forwarded-for"]`, `["x-forwarded-test"]`} {
 		t.Run(raw, func(t *testing.T) {
 			cfg := sharedTestConfig(t)
 			pin := cfg.Contexts[0].Operations["run_execute"]

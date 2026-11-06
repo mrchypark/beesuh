@@ -161,10 +161,39 @@ const sharedOrganization = "smoke-org"
 const sharedWorkspace = "smoke-shared"
 const grantHintAudience = "urn:grant:smoke-hint"
 
-// Existing Grant wire-v1 golden pins are wire-contract fixtures only. They are
-// not a registered Bee/Exposure catalog, learner grant, or live-service proof.
+// Historical pins plus the owner-confirmed wire2 shape are fixture-only.
+// No supplier wire2 golden exists; these are not live catalog hash proofs.
 const fixtureCatalog = "sha256:833587bd54c6af1c79f7c56955fc5289d1b01a4e69d8462463afed85cc9caa0b"
-const fixtureContract = "sha256:e24b65bb4c4e37a170ed8fabcf94bab2111861b1b6d220395d5274f22f0bdf42"
+
+// Reviewed ASCII canonical preimages, authored from the owner specification.
+// This is deliberately separate from the production selected-contract encoder.
+func fixtureContractPreimage(operation string) string {
+	route, ok := fixtureOperations()[operation]
+	if !ok {
+		panic("unknown fixture operation")
+	}
+	pathParameters := ""
+	if strings.Contains(route[1], "{id}") {
+		pathParameters = `"pathParameters":[{"format":"asciiToken","maxBytes":256,"name":"id"}],`
+	}
+	query := `{"mode":"none"}`
+	if operation == "run_read" || operation == "history_read" || operation == "run_cancel" {
+		parameters := `{"format":"asciiToken","maxBytes":256,"name":"workspace_id","repeated":false,"required":true}`
+		if operation == "history_read" {
+			parameters += `,{"format":"asciiToken","maxBytes":256,"name":"session_key","repeated":false,"required":true}`
+		}
+		query = `{"mode":"exact","parameters":[` + parameters + `]}`
+	}
+	request := `{"authorization":"forward-user","body":"none","forwardHeaders":["x-organization-id"],"maxBytes":0}`
+	if operation == "run_execute" || operation == "connection_select" {
+		request = `{"authorization":"forward-user","body":"opaque","contentTypes":["application/json"],"forwardHeaders":["content-type","x-organization-id"],"maxBytes":262144}`
+	}
+	return fmt.Sprintf(`{"accessMode":"authorized","actionId":%q,"capabilityId":%q,"enabled":true,"method":%q,%s"pathTemplate":%q,"query":%s,"request":%s,"resource":{"id":{"kind":"constant","value":"smoke-shared"},"type":"workspace"},"response":{"forwardHeaders":[],"maxBytes":1048576,"redirects":"deny"},"version":1}`, fixtureAction(operation), "bee."+operation, route[0], pathParameters, route[1], query, request)
+}
+
+func fixtureContractDigest(operation string) string {
+	return fixtureDigest([]byte(fixtureContractPreimage(operation)))
+}
 
 // Owner-supported constant resource for this single-workspace fixture. This
 // does not register a catalog or grant membership from caller selectors.
@@ -236,7 +265,7 @@ func sharedFixtureConfig(base []byte, partial bool) ([]byte, error) {
 		if operation == "run_execute" || operation == "connection_select" {
 			headers = []string{"content-type", "x-organization-id"}
 		}
-		operations[operation] = map[string]any{"capability_id": "bee." + operation, "capability_version": 1, "contract_digest": fixtureContract, "action_id": fixtureAction(operation), "forward_headers": headers}
+		operations[operation] = map[string]any{"capability_id": "bee." + operation, "capability_version": 1, "contract_digest": fixtureContractDigest(operation), "action_id": fixtureAction(operation), "forward_headers": headers}
 	}
 	config["shared"] = map[string]any{
 		"grant_url": issuer, "app_key_file": "/config/grant-app-key", "grant_credential_hint_audience": grantHintAudience,
@@ -259,9 +288,11 @@ type fixtureExpectation struct {
 }
 
 type fixturePolicyStats struct {
-	Checks     int `json:"checks"`
-	Allows     int `json:"allows"`
-	Violations int `json:"violations"`
+	Catalogs   int   `json:"catalogs"`
+	Revision   int64 `json:"revision"`
+	Checks     int   `json:"checks"`
+	Allows     int   `json:"allows"`
+	Violations int   `json:"violations"`
 }
 
 type fixturePolicy struct {
@@ -269,10 +300,66 @@ type fixturePolicy struct {
 	expected fixtureExpectation
 	nonces   map[string]bool
 	observed fixturePolicyStats
+	revision int64
+	fetched  bool
 }
 
 func newFixturePolicy() *fixturePolicy {
-	return &fixturePolicy{nonces: map[string]bool{}}
+	return &fixturePolicy{nonces: map[string]bool{}, revision: 7}
+}
+
+// Catalog bytes follow the owner's schema, with configured fixture pins only.
+// This fixture does not compile catalogs or recompute pending canonical hashes.
+func (p *fixturePolicy) catalog(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if r.Method != "GET" || r.URL.Path != "/api/v2/http-capabilities/catalog/bee-smoke-provider" || len(r.Header.Values("X-Grant-App-Auth-Key")) != 1 || r.Header.Get("X-Grant-App-Auth-Key") != fixtureAppKey || len(r.Header.Values("Authorization")) != 0 || len(r.Header.Values("X-Organization-ID")) != 0 || r.Header.Get("Cookie") != "" || r.URL.RawQuery != "" {
+		p.observed.Violations++
+		http.Error(w, "fixture catalog requires app key only", 403)
+		return
+	}
+	p.observed.Catalogs++
+	p.fetched = true
+	capabilities := []any{}
+	for operation, route := range fixtureOperations() {
+		headers := []string{"x-organization-id"}
+		body, maxBytes := "none", uint64(0)
+		if operation == "run_execute" || operation == "connection_select" {
+			headers = []string{"content-type", "x-organization-id"}
+			body, maxBytes = "opaque", 262144
+		}
+		query := map[string]any{"mode": "none"}
+		if operation == "run_read" || operation == "history_read" || operation == "run_cancel" {
+			parameters := []any{map[string]any{"name": "workspace_id", "format": "asciiToken", "required": true, "repeated": false, "maxBytes": uint64(256)}}
+			if operation == "history_read" {
+				parameters = append(parameters, map[string]any{"name": "session_key", "format": "asciiToken", "required": true, "repeated": false, "maxBytes": uint64(256)})
+			}
+			query = map[string]any{"mode": "exact", "parameters": parameters}
+		}
+		request := map[string]any{"body": body, "maxBytes": maxBytes, "forwardHeaders": headers, "authorization": "forward-user"}
+		if body == "opaque" {
+			request["contentTypes"] = []string{"application/json"}
+		}
+		capability := map[string]any{
+			"capabilityId": "bee." + operation, "version": uint64(1), "enabled": true, "accessMode": "authorized", "method": route[0], "pathTemplate": route[1], "actionId": fixtureAction(operation),
+			"resource": map[string]any{"type": "workspace", "id": map[string]string{"kind": "constant", "value": sharedWorkspace}},
+			"query":    query, "request": request, "response": map[string]any{"maxBytes": uint64(1048576), "forwardHeaders": []string{}, "redirects": "deny"}, "contractDigest": fixtureContractDigest(operation),
+		}
+		if strings.Contains(route[1], "{id}") {
+			capability["pathParameters"] = []any{map[string]any{"name": "id", "format": "asciiToken", "maxBytes": uint64(256)}}
+		}
+		capabilities = append(capabilities, capability)
+	}
+	now := time.Now().UTC()
+	catalog := map[string]any{"schemaVersion": uint64(1), "authorizationMode": "user", "pepPolicyRevision": p.revision, "providerId": "bee-smoke-provider", "pepClientId": "bee-smoke-pep", "generation": uint64(1), "catalogDigest": fixtureCatalog, "capabilities": capabilities, "issuedAt": now, "expiresAt": now.Add(30 * time.Second)}
+	switch p.expected.Mode {
+	case "catalog-unavailable":
+		http.Error(w, "fixture catalog unavailable", 503)
+		return
+	case "catalog-decide-race":
+		p.revision += 4
+	}
+	_ = json.NewEncoder(w).Encode(catalog)
 }
 
 func (p *fixturePolicy) expect(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +374,9 @@ func (p *fixturePolicy) expect(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Lock()
 	p.expected = expected
+	if expected.Mode == "revision-11" {
+		p.revision = 11
+	}
 	p.mu.Unlock()
 	fmt.Fprintln(w, `{}`)
 }
@@ -341,17 +431,23 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	credential := "Bearer " + expected.Token
 	headerDigest, validContentType := fixtureHeaderDigest(operation, expected.ContentTypes)
 	values := map[string]any{
+		"wireVersion": uint64(2), "pepPolicyRevision": p.revision,
 		"bodyDigest": fixtureDigest([]byte(expected.Body)), "bodyLength": len(expected.Body), "canonicalPath": u.Path,
 		"canonicalQuery": query, "canonicalQueryDigest": fixtureDigest([]byte(query)), "forwardedHeaderDigest": headerDigest,
 		"capabilityId": "bee." + operation, "capabilityVersion": 1, "catalogDigest": fixtureCatalog, "catalogGeneration": 1,
-		"contractDigest": fixtureContract, "method": expected.Method, "pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider",
+		"contractDigest": fixtureContractDigest(operation), "method": expected.Method, "pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider",
 		"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience}, "providerCredentialDigest": fixtureCredentialDigest(credential),
 		"resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": fixtureEvidenceKind, "name": ""}, "resourceId": sharedWorkspace, "resourceType": "workspace",
 	}
 	if expected.Token == "smoke-nonmember-token" {
 		values["providerCredential"] = map[string]string{"subject": "nonmember-user", "audience": grantHintAudience}
 	}
-	valid := validContentType && operation != "" && r.Method == "POST" && r.URL.Path == "/api/v2/http-capabilities/decide" && r.Header.Get("Authorization") == credential && r.Header.Get("X-Organization-ID") == sharedOrganization && r.Header.Get("X-Grant-App-Auth-Key") == fixtureAppKey && len(request) == len(values)+1
+	valid := validContentType && p.fetched && operation != "" && r.Method == "POST" && r.URL.Path == "/api/v2/http-capabilities/decide" && len(r.Header.Values("Authorization")) == 1 && r.Header.Get("Authorization") == credential && len(r.Header.Values("X-Organization-ID")) == 1 && r.Header.Get("X-Organization-ID") == sharedOrganization && len(r.Header.Values("X-Grant-App-Auth-Key")) == 1 && r.Header.Get("X-Grant-App-Auth-Key") == fixtureAppKey && len(request) == len(values)+1
+	p.fetched = false
+	if expected.Mode == "catalog-decide-race" {
+		http.Error(w, "fixture stale policy", 403)
+		return
+	}
 	for name, value := range values {
 		var actual any
 		encoded, _ := json.Marshal(value)
@@ -374,6 +470,7 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.nonces[nonce] = true
+	p.observed.Revision = p.revision
 	if expected.Mode == "outage" {
 		http.Error(w, "fixture PDP unavailable", 503)
 		return
@@ -401,6 +498,10 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		values["forwardedHeaderDigest"] = fixtureDigest(nil)
 	case "bad-hint":
 		values["providerAudience"] = serviceAudience
+	case "stale-revision":
+		values["pepPolicyRevision"] = int64(7)
+	case "malformed-revision":
+		values["pepPolicyRevision"] = "11"
 	}
 	p.observed.Allows++
 	_ = json.NewEncoder(w).Encode(values)

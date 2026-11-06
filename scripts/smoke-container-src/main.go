@@ -127,6 +127,7 @@ func fixtureHandler() http.Handler {
 	mux := http.NewServeMux()
 	policy := newFixturePolicy()
 	mux.Handle("/api/v2/http-capabilities/decide", policy)
+	mux.HandleFunc("/api/v2/http-capabilities/catalog/bee-smoke-provider", policy.catalog)
 	mux.HandleFunc("/smoke/expect", policy.expect)
 	mux.HandleFunc("/smoke/policy-stats", policy.stats)
 	mux.HandleFunc("POST /introspect", func(w http.ResponseWriter, r *http.Request) {

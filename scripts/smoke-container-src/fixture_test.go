@@ -288,15 +288,16 @@ func TestSharedExpectationUsesOriginalContentType(t *testing.T) {
 }
 
 func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
-	for _, mutate := range []string{"valid", "bodyDigest", "bodyLength", "canonicalPath", "canonicalQueryDigest", "forwardedHeaderDigest", "providerCredentialDigest", "catalogDigest", "contractDigest", "resourceEvidence", "unsupported-header-kind", "wrong-resource", "nonmember", "requestBinding", "original-bearer", "hint"} {
+	for _, mutate := range []string{"valid", "wireVersion", "pepPolicyRevision", "bodyDigest", "bodyLength", "canonicalPath", "canonicalQueryDigest", "forwardedHeaderDigest", "providerCredentialDigest", "catalogDigest", "contractDigest", "resourceEvidence", "unsupported-header-kind", "wrong-resource", "nonmember", "requestBinding", "original-bearer", "hint"} {
 		t.Run(mutate, func(t *testing.T) {
 			policy := newFixturePolicy()
 			body := `{"workspace_id":"smoke-shared","message":"independent bytes"}`
 			policy.expected = fixtureExpectation{Method: "POST", Path: "/v1/chat", Body: body, Token: "smoke-access-token", Mode: "allow", ContentTypes: []string{"application/json; charset=utf-8"}}
 			wire := map[string]any{
+				"wireVersion": uint64(2), "pepPolicyRevision": int64(7),
 				"bodyDigest": fixtureDigest([]byte(body)), "bodyLength": len(body), "canonicalPath": "/v1/chat", "canonicalQuery": "",
 				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": "sha256:d9500b9751dc32207195b57b1f21d7a7343beaca1e40931d9487ab0a165caadc", "method": "POST",
-				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContract,
+				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContractDigest("run_execute"),
 				"pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider", "providerCredentialDigest": fixtureCredentialDigest("Bearer smoke-access-token"),
 				"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience},
 				"resourceId":         sharedWorkspace, "resourceType": "workspace", "resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": "constant", "name": ""},
@@ -335,12 +336,20 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				request.Header.Set("Authorization", "Bearer another-token")
 			}
 			response := httptest.NewRecorder()
+			catalogRequest := httptest.NewRequest("GET", "/api/v2/http-capabilities/catalog/bee-smoke-provider", nil)
+			catalogRequest.Header.Set("X-Grant-App-Auth-Key", fixtureAppKey)
+			catalogResponse := httptest.NewRecorder()
+			policy.catalog(catalogResponse, catalogRequest)
+			if catalogResponse.Code != 200 {
+				t.Fatal("fixture catalog unavailable")
+			}
 			policy.ServeHTTP(response, request)
 			if (response.Code == 200) != (mutate == "valid") {
 				t.Fatalf("snapshot %s status=%d", mutate, response.Code)
 			}
 			if mutate == "valid" {
 				// A replayed request binding is rejected even when every digest matches.
+				policy.catalog(httptest.NewRecorder(), catalogRequest)
 				request.Body = io.NopCloser(bytes.NewReader(data))
 				response = httptest.NewRecorder()
 				policy.ServeHTTP(response, request)
@@ -349,6 +358,62 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFixtureCatalogUsesActiveRevisionAndKeyOnly(t *testing.T) {
+	p := newFixturePolicy()
+	for _, revision := range []int64{7, 11} {
+		p.revision = revision
+		req := httptest.NewRequest("GET", "/api/v2/http-capabilities/catalog/bee-smoke-provider", nil)
+		req.Header.Set("X-Grant-App-Auth-Key", fixtureAppKey)
+		out := httptest.NewRecorder()
+		p.catalog(out, req)
+		var catalog struct {
+			Mode         string                       `json:"authorizationMode"`
+			Revision     int64                        `json:"pepPolicyRevision"`
+			Capabilities []map[string]json.RawMessage `json:"capabilities"`
+		}
+		if out.Code != 200 || json.Unmarshal(out.Body.Bytes(), &catalog) != nil || catalog.Mode != "user" || catalog.Revision != revision || len(catalog.Capabilities) != len(fixtureOperations()) {
+			t.Fatal("active catalog envelope changed")
+		}
+		for _, capability := range catalog.Capabilities {
+			var id string
+			if json.Unmarshal(capability["capabilityId"], &id) != nil {
+				t.Fatal("invalid fixture capability ID")
+			}
+			operation := strings.TrimPrefix(id, "bee.")
+			var digest string
+			if json.Unmarshal(capability["contractDigest"], &digest) != nil || digest != fixtureContractDigest(operation) {
+				t.Fatal("fixture capability did not use its reviewed preimage pin")
+			}
+			for _, field := range []string{"capabilityId", "version", "enabled", "accessMode", "method", "pathTemplate", "actionId", "resource", "query", "request", "response", "contractDigest"} {
+				if len(capability[field]) == 0 {
+					t.Fatalf("catalog missing required capability field %s", field)
+				}
+			}
+			var resource struct {
+				ID map[string]string `json:"id"`
+			}
+			if json.Unmarshal(capability["resource"], &resource) != nil || len(resource.ID) != 2 || resource.ID["kind"] != "constant" || resource.ID["value"] != sharedWorkspace {
+				t.Fatal("catalog constant extractor must use value, not resource evidence name")
+			}
+			delete(capability, "contractDigest")
+			actualJSON, _ := json.Marshal(capability)
+			var actual, expected any
+			if json.Unmarshal(actualJSON, &actual) != nil || json.Unmarshal([]byte(fixtureContractPreimage(operation)), &expected) != nil || !reflect.DeepEqual(actual, expected) {
+				t.Fatal("catalog capability differs from independent reviewed preimage")
+			}
+		}
+		for _, header := range []string{"Authorization", "X-Organization-ID"} {
+			req.Header.Set(header, "must-not-forward")
+			out := httptest.NewRecorder()
+			p.catalog(out, req)
+			if out.Code != 403 {
+				t.Fatalf("catalog accepted %s", header)
+			}
+			req.Header.Del(header)
+		}
 	}
 }
 

@@ -541,6 +541,24 @@ func (f flow) sharedFlow(phase string) error {
 		if err := f.counts(saved.Models, saved.Deliveries); err != nil {
 			return err
 		}
+		// Change the active catalog revision without restarting Bee or its config.
+		beforeRevision, err := f.policyStats()
+		if err != nil {
+			return err
+		}
+		if beforeRevision.Revision != 7 {
+			return fmt.Errorf("initial policy revision=%d, want 7", beforeRevision.Revision)
+		}
+		if _, err := f.sharedRequest("GET", "/v1/providers", "", "smoke-access-token", sharedOrganization, "", "revision-11", 200); err != nil {
+			return err
+		}
+		afterRevision, err := f.policyStats()
+		if err != nil {
+			return err
+		}
+		if afterRevision.Revision != 11 || afterRevision.Catalogs <= beforeRevision.Catalogs {
+			return fmt.Errorf("active revision was cached or replaced by a constant")
+		}
 		// A matching optional selector is validated but excluded from the digest.
 		if _, err := f.sharedRequest("GET", "/v1/providers", "", "smoke-access-token", sharedOrganization, sharedWorkspace, "allow", 200); err != nil {
 			return err
@@ -606,6 +624,10 @@ func (f flow) sharedFlow(phase string) error {
 			{"digest", "smoke-access-token", sharedOrganization, sharedWorkspace, "bad-digest", 403},
 			{"headers", "smoke-access-token", sharedOrganization, sharedWorkspace, "bad-headers", 403},
 			{"hint", "smoke-access-token", sharedOrganization, sharedWorkspace, "bad-hint", 403},
+			{"catalog-unavailable", "smoke-access-token", sharedOrganization, "", "catalog-unavailable", 403},
+			{"stale-revision", "smoke-access-token", sharedOrganization, "", "stale-revision", 403},
+			{"malformed-revision", "smoke-access-token", sharedOrganization, "", "malformed-revision", 403},
+			{"catalog-decide-race", "smoke-access-token", sharedOrganization, "", "catalog-decide-race", 403},
 		} {
 			attempt := s
 			if test.name == "body-workspace" {

@@ -266,6 +266,130 @@ internal HTTP URL, report that exact requirement before changing transport
 policy; do not silently relax TLS or substitute a guessed endpoint. App-key
 rotation requires recreating the configured client (restart the service).
 
+### Grant wire v2 migration and proxy allowlist
+
+The v0.6.0 compatibility target uses Grant wire v2. Beesuh v0.5.1's older wire
+contract is incompatible with Grant v0.9.0; do not treat an unchanged URL or
+valid app key as proof of compatibility. This section records the completed
+owner-supplied contract, based on Grant source
+`f0ab0e7684f279dc84f82f22c7537d3679780eb9` and subsequent owner clarifications;
+contract completeness does not establish release or live acceptance.
+
+| Migration item | v0.5.1 → v0.6.0 |
+| --- | --- |
+| Grant wire | Older contract → integer wire version 2; required for Grant v0.9.0 |
+| Private proxy | Retain decide POST; allow the exact provider catalog GET below |
+| Service settings | Keep existing authority, app-key file and static catalog/capability pins; fetch revision online |
+| User/model credentials | Keep original human Bearer, Goauthy consent and memory-only key delivery; no new client, permission or credential |
+| Acceptance | Verify the selected release's CI and exact image digest; no cancellation/streaming claim for the first integration |
+
+Allow these exact method/path pairs through the existing Grant proxy:
+
+| Method | Path | Authentication |
+| --- | --- | --- |
+| GET | `/api/v2/http-capabilities/catalog/beesuh` | Only normal `X-Grant-App-Auth-Key: <raw-app-key>`; no human Bearer or organization header |
+| POST | `/api/v2/http-capabilities/decide` | Existing app-key and original human Bearer contract |
+
+The GET path's final segment is the configured `provider_id`; `beesuh` is the
+consumer example, not a new endpoint or registration. Preserve the raw app-key
+header rather than adding a Bearer prefix. The catalog envelope is configured
+for the provider/PEP, not scoped to the user's organization. Do not add a user
+token to catalog configuration or persist it for these checks.
+The private proxy needs only this added GET and the existing decide POST, not a
+wildcard API allowlist. Decide requires exactly one each of `Authorization`,
+`X-Organization-ID` and `X-Grant-App-Auth-Key`; reject duplicate security headers.
+
+Every authorization check must fetch the active catalog, require
+`authorizationMode: "user"` and a positive `pepPolicyRevision`, then match the
+configured provider, PEP, generation, catalog digest and capability pins exactly.
+Only the fetched revision enters the subsequent wire-v2 decide request. Existing
+static pins and service settings remain; no revision setting, extra API, OAuth
+client or permission is introduced. No cache, retry or fallback may turn a
+failed check into an allow. A policy change between GET and decide can produce
+HTTP 403 for a stale revision; reject that request.
+
+The catalog top-level fields are `authorizationMode` (string),
+`pepPolicyRevision` (positive int64), `schemaVersion` (uint64, exactly 1), `providerId`,
+`pepClientId`, `catalogDigest`, `issuedAt`, `expiresAt` (strings), `generation`
+(uint64), and `capabilities` (array); `responseResources` is an optional array.
+Catalog timestamps are RFC3339Nano with a 30-second TTL. Exposure checks
+`expiresAt > now` without a separate issued-at skew check; do not infer a skew
+tolerance from that behavior.
+Catalog and contract digests follow their distinct owner-defined canonical
+preimages; neither SHA-256 of the whole HTTP envelope nor one generic JCS
+transformation is a substitute. Production matches the configured exact catalog
+pin and canonically recomputes the selected capability's `actualContractDigest`
+against its reviewed contract pin; comparing advertised pins alone is
+insufficient. This selected-capability validation does not add a whole-catalog
+compiler or raw-envelope-hash fallback. Existing full-Bearer credential,
+body, query and forwarded-header digest rules remain unchanged. This selected
+subset's upstream acceptance is separate from specification completeness.
+
+Recomputation applies only to the selected typed-serialized capability from the
+normal ActiveCatalog GET, not arbitrary staging JSON. Parse with duplicate-key
+rejection and exact integers, remove only its top-level `contractDigest`, and
+hash compact JSON with recursively sorted object keys, original array order and
+preserved null/empty-array distinctions. Do not fill defaults or normalize fields
+before hashing. Use Go string escaping with actual U+2028/U+2029 UTF-8, no HTML
+escaping and no trailing LF. The result must match both the advertised digest
+and the configured reviewed pin; independent vector tests are required.
+
+In this catalog response, required `request.forwardHeaders` and
+`response.forwardHeaders` may be null: treat null as an empty runtime allowlist
+but preserve raw null in the canonical hash (`null` differs from `[]`). Missing
+keys, null elements and empty header names remain invalid. This exception does
+not extend to `pathParameters` arrays or Beesuh's configured `forward_headers`,
+where explicit null remains invalid. HTTP staging validation is a separate
+contract and does not override the normal ActiveCatalog response behavior.
+
+The supplier provided one nonsecret canonical vector for `inventory/vector.read`:
+contract digest `sha256:dff00647c46093e40e72139bb379208b85bc7572d1371188d1a34b2d69aff1df`
+and catalog digest `sha256:c37b5c8351df45b710b9bf152e36a50884278de82f49c5035ec3105df813b890`.
+These are not current Beesuh pins or a complete wire-v2 golden bundle. Consumer
+fixtures must retain their owner-specification provenance and must not relabel
+this single supplier vector as full-protocol acceptance evidence.
+
+Each capability always contains `capabilityId`, `version` (uint64), `enabled`,
+`accessMode`, `method`, `pathTemplate`, `actionId`, `resource`, `query`, `request`,
+`response` and `contractDigest`. `actionId` is a string for authorized access
+and nullable for `public_authn`. Optional fields are `pathParameters`,
+`recordScope`, `batch`, `responseAuthorization` and `organizationContext`.
+`resource` contains `type` (string) and `id` (extractor object). `request` contains
+`body` (string), `maxBytes` (uint64), `forwardHeaders` (string array), with optional
+`authorization` (string) and `contentTypes` (string array). `response` contains
+`maxBytes` (uint64), `forwardHeaders` (string array), `redirects` (string), and
+optional `errorStatuses` (integer array).
+
+The decide input includes `wireVersion` (JSON integer 2) and the fetched
+`pepPolicyRevision` (JSON int64, 1–9223372036854775807); preserve integer precision
+without float conversion.
+`actionId` is a decision response field, not an input. Neither
+`authorizationMode` nor an override is a decide input. Validate the USER decision
+against its request binding and configured authority, including revision, action,
+resource, principal and expiry. The response does not echo raw `canonicalQuery`,
+`providerCredential` or `resourceEvidence`.
+Validate the full USER response schema, wire version, revision, request echoes
+and timestamps before interpreting `allowed`. An `allowed: false` response must
+still satisfy those checks; it is not a shorter response format.
+
+Decision timestamps allow zero clock skew: `issuedAt <= now`, `expiresAt > now`,
+and `0 < expiresAt - issuedAt <= 5 seconds`. Recheck `expiresAt > now` immediately
+before dispatch. `principalDigest` is an opaque 64-character lowercase hex value
+without a `sha256:` prefix; do not recompute it from the Goauthy subject. A
+supported follow-up check must retain the first allow's principal digest.
+`providerCredentialDigest` keeps the existing domain-separated preimage with a
+U64BE length prefix over the complete `Bearer <token>` value, including the
+scheme and space; do not change the existing domain or encoding.
+
+There is no official public SDK or complete supplier wire-v2 golden bundle.
+Consumer fixtures derived from the owner specification must identify that
+provenance and must not be described as supplier goldens. This contract alone
+does not establish implementation or live acceptance. The catalog GET uses the
+same normal app key, with no new credentials; issuer and original human Bearer
+handling are unchanged. Goauthy consent,
+bodyless credential delivery, user isolation and memory-only model keys remain
+unchanged; Grant authorization never substitutes for them.
+
 `providers.json` uses existing credential-free service provider fields:
 
 ```json

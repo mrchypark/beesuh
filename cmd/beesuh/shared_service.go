@@ -72,7 +72,7 @@ func sharedForwardHeaders(raw json.RawMessage) ([]string, bool) {
 		return nil, false
 	}
 	for i, name := range names {
-		if name == "" || (i > 0 && names[i-1] >= name) {
+		if name == "" || (i > 0 && names[i-1] >= name) || strings.HasPrefix(name, "x-grant-") || strings.HasPrefix(name, "x-forwarded-") {
 			return nil, false
 		}
 		for _, c := range name {

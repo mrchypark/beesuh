@@ -5,7 +5,7 @@
 
 ## 런타임과 저장 경로
 
-현재 소스는 Rhiza v0.23.0(커밋 `f050d6e30f57718736c8c4fdb5edef777183bc05`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
+현재 소스는 Rhiza v0.23.1(커밋 `2262531f266f2638eb21baea6f65de45465ffe90`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
 `NodeID`는 `beesuh`, `PeerAddr`는 `127.0.0.1:0`입니다. 피어 주소는 루프백의
 임시 포트이며 외부 서비스 주소로 사용하지 않습니다. `LocalArchive`와 `ObjStore`는
 설정하지 않습니다. 기본 `Local:false`는 단일 멤버 임베디드 voter 구성이며,
@@ -157,7 +157,8 @@ BeforeAck/RPO0나 분산 fencing을 새 릴리스 조건으로 요구하지 않�
 ## 검증 범위
 
 이 문서는 현재 소스와 커밋이 고정된 Rhiza 공식 문서를 대조한 운영 안내입니다.
-Rhiza 모듈은 `v0.23.0`입니다. 후보 커밋
+현재 v0.23.1의 아티팩트 근거와 후보 검증 범위는 [평가 문서](rhiza-0.23.1-assessment.md)에 기록합니다. 후보 CI 결과는 해당 PR에서 확인하세요.
+다음은 이전 Rhiza `v0.23.0` 후보 커밋
 `3da2ddc8b153128d20e3b44533caad823dfdc58d`의
 [CI 42122655777](https://github.com/mrchypark/beesuh/actions/runs/42122655777)에서
 gofmt, vet, 전체 일반·race 테스트, Darwin arm64 CGo-free 빌드와

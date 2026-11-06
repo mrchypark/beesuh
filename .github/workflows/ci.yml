@@ -71,7 +71,7 @@ jobs:
           work=$(mktemp -d "$RUNNER_TEMP/beesuh-darwin.XXXXXXXX")
           trap 'rm -rf "$work"' EXIT
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$work/beesuh" ./cmd/beesuh
-      - name: Retained local data from Rhiza v0.22.0
+      - name: Rhiza v0.22.0 negative control and v0.23.0 retained data
         shell: sh
         run: |
           set -eu
@@ -81,11 +81,17 @@ jobs:
           cp go.sum "$work/baseline.sum"
           go mod edit -modfile="$work/baseline.mod" -require=github.com/mrchypark/rhiza@v0.22.0
           go mod download -modfile="$work/baseline.mod" github.com/mrchypark/rhiza
+          cp go.mod "$work/seed.mod"
+          cp go.sum "$work/seed.sum"
+          go mod edit -modfile="$work/seed.mod" -require=github.com/mrchypark/rhiza@v0.23.0
+          go mod download -modfile="$work/seed.mod" github.com/mrchypark/rhiza
           baseline=$(go list -mod=readonly -modfile="$work/baseline.mod" -m -f '{{.Version}}' github.com/mrchypark/rhiza)
+          seed=$(go list -mod=readonly -modfile="$work/seed.mod" -m -f '{{.Version}}' github.com/mrchypark/rhiza)
           candidate=$(go list -mod=readonly -m -f '{{.Version}}' github.com/mrchypark/rhiza)
-          printf 'Rhiza seed=%s verify=%s\n' "$baseline" "$candidate"
+          printf 'Rhiza negative-control=%s seed=%s verify=%s\n' "$baseline" "$seed" "$candidate"
           test "$baseline" = v0.22.0
-          test "$candidate" = v0.23.0
+          test "$seed" = v0.23.0
+          test "$candidate" = v0.23.1
           baseline_status=0
           go test -mod=readonly -modfile="$work/baseline.mod" -count=1 -timeout 120s -v \
             -run '^TestRhizaQueryCancellationKeepsHTTPCategory$' ./httpapi \
@@ -96,7 +102,7 @@ jobs:
             grep -F -- "--- FAIL: TestRhizaQueryCancellationKeepsHTTPCategory/$mode (" "$work/baseline-query.log"
           done
           test "$(grep -c 'Query lost context cause:' "$work/baseline-query.log")" -eq 2
-          go test -mod=readonly -modfile="$work/baseline.mod" -c -o "$work/seed.test" .
+          go test -mod=readonly -modfile="$work/seed.mod" -c -o "$work/seed.test" .
           BEESUH_RECOVERY_SEED_BINARY="$work/seed.test" go test -mod=readonly -count=1 -timeout 120s -v -run '^TestSingleNodeDurableRecovery$' .
 
   opencode-plugin:

@@ -45,9 +45,10 @@ go run ./cmd/beesuh \
 
 ### 기존 Rhiza 데이터의 업그레이드
 
-Beesuh는 [Rhiza v0.23.0](https://github.com/mrchypark/rhiza/tree/f050d6e30f57718736c8c4fdb5edef777183bc05)
-(커밋 `f050d6e30f57718736c8c4fdb5edef777183bc05`)으로 버전을 고정합니다.
-후보 CI는 v0.22.0에서 만든 실행·대화 데이터를 보존한 채 SIGKILL 후 v0.23.0으로
+이 평가 브랜치의 후보는 [Rhiza v0.23.2](https://github.com/mrchypark/rhiza/tree/2dc60add1c4cf99a9ff1050bfc7ad586f29ae7e1)
+(커밋 `2dc60add1c4cf99a9ff1050bfc7ad586f29ae7e1`)입니다.
+[아티팩트 gate는 PASS이며 후보 CI는 대기 중입니다](docs/rhiza-0.23.2-assessment.md).
+이전 v0.23.0 후보 CI는 v0.22.0에서 만든 실행·대화 데이터를 보존한 채 SIGKILL 후 v0.23.0으로
 재열어 결과 재사용과 대화 계속하기를 검증했습니다. 이 결과를 모든 레코드나 다른
 버전의 데이터로 일반화하지 마세요. 이전 데이터와 바이너리를 보존하고 복사본으로
 검증하세요. 다운그레이드는 검증하지 않았습니다.

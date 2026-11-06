@@ -1,0 +1,19 @@
+{
+  "provenance": "Grant owner handoff for f0ab0e7684f279dc84f82f22c7537d3679780eb9, organization-context-vectors.json omitted case. Single nonsecret canonical digest vector, not a full wire2 golden bundle.",
+  "expectedContractDigest": "sha256:dff00647c46093e40e72139bb379208b85bc7572d1371188d1a34b2d69aff1df",
+  "canonicalPreimage": "{\"accessMode\":\"authorized\",\"actionId\":\"inventory.item.read\",\"capabilityId\":\"vector.read\",\"enabled\":true,\"method\":\"GET\",\"pathTemplate\":\"/items/{itemId}\",\"query\":{\"mode\":\"none\"},\"request\":{\"body\":\"none\",\"forwardHeaders\":[],\"maxBytes\":0},\"resource\":{\"id\":{\"format\":\"asciiToken\",\"kind\":\"pathSegment\",\"name\":\"itemId\"},\"type\":\"item\"},\"response\":{\"forwardHeaders\":[],\"maxBytes\":4096,\"redirects\":\"deny\"},\"version\":1}",
+  "capability": {
+    "capabilityId": "vector.read",
+    "version": 1,
+    "enabled": true,
+    "accessMode": "authorized",
+    "method": "GET",
+    "pathTemplate": "/items/{itemId}",
+    "actionId": "inventory.item.read",
+    "resource": {"type":"item","id":{"kind":"pathSegment","name":"itemId","format":"asciiToken"}},
+    "query": {"mode":"none"},
+    "request": {"body":"none","maxBytes":0,"forwardHeaders":[]},
+    "response": {"maxBytes":4096,"forwardHeaders":[],"redirects":"deny"},
+    "contractDigest": "sha256:dff00647c46093e40e72139bb379208b85bc7572d1371188d1a34b2d69aff1df"
+  }
+}

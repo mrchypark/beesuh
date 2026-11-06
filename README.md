@@ -109,6 +109,14 @@ context, `X-Workspace-ID` can be omitted; organization and matching body/query
 workspace remain required. Omitting the new field retains v0.5's required
 workspace header and fixed digest lists. See the linked contract before changing
 Exposure forwarding; no additional nginx hop is required.
+For the v0.6.0 Grant wire-v2 compatibility target, see the linked migration and
+proxy allowlist section. Beesuh v0.5.1's wire contract is incompatible with Grant
+v0.9.0; existing static pins remain, while the active policy revision is fetched
+online rather than configured. Implementation/release acceptance is separate
+from the completed authority specification. Production matches the catalog pin
+and canonically recomputes the selected capability's `actualContractDigest`
+against its reviewed pin; it adds no whole-catalog compiler or raw-envelope-hash
+fallback.
 
 ```sh
 go run ./cmd/beesuh -listen 127.0.0.1:8080 \

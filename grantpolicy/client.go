@@ -1,7 +1,6 @@
-// Package grantpolicy implements a static, reviewed HTTP-capability PEP binding.
-// It does not compile catalogs, grant permissions, or establish catalog freshness.
-// Grant's owner-side freshness proof remains pending. Callers must enforce Check
-// immediately before the exact operation and keep Goauthy consent separate.
+// Package grantpolicy checks reviewed pins against the current USER catalog
+// before requesting a wire-v2 decision. It does not compile contracts or grant
+// permissions. Callers must keep Goauthy consent separate.
 package grantpolicy
 
 import (
@@ -20,8 +19,11 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var ErrDenied = errors.New("grantpolicy: authorization denied or unavailable")
@@ -148,6 +150,8 @@ func CredentialDigest(authorization string) string {
 }
 
 type wireRequest struct {
+	WireVersion           uint64 `json:"wireVersion"`
+	PEPPolicyRevision     int64  `json:"pepPolicyRevision"`
 	BodyDigest            string `json:"bodyDigest"`
 	BodyLength            int64  `json:"bodyLength"`
 	CanonicalPath         string `json:"canonicalPath"`
@@ -177,6 +181,7 @@ func (c *Client) request(b Binding, s ActualSnapshot, cred Credential, nonce str
 	w := wireRequest{BodyDigest: s.BodyDigest, BodyLength: s.BodyLength, CanonicalPath: s.CanonicalPath, CanonicalQuery: s.CanonicalQuery, CanonicalQueryDigest: Digest([]byte(s.CanonicalQuery)), CapabilityID: b.CapabilityID, CapabilityVersion: b.CapabilityVersion, CatalogDigest: c.config.CatalogDigest, CatalogGeneration: c.config.CatalogGeneration, ContractDigest: b.ContractDigest, ForwardedHeaderDigest: s.ForwardedHeaderDigest, Method: s.Method, PEPClientID: c.config.PEPClientID, ProviderCredentialDigest: CredentialDigest(cred.Authorization), ProviderID: c.config.ProviderID, RequestBinding: nonce, ResourceEvidence: b.ResourceEvidence, ResourceID: b.ResourceID, ResourceType: b.ResourceType}
 	w.ProviderCredential.Audience = cred.Audience
 	w.ProviderCredential.Subject = cred.Subject
+	w.WireVersion = 2
 	return w
 }
 func (c *Client) Check(ctx context.Context, operation string, s ActualSnapshot, cred Credential) error {
@@ -184,11 +189,18 @@ func (c *Client) Check(ctx context.Context, operation string, s ActualSnapshot, 
 	if !ok || !validSnapshot(s) || !strings.HasPrefix(cred.Authorization, "Bearer ") || len(cred.Authorization) <= 7 || strings.ContainsAny(cred.Authorization, "\r\n") || cred.Subject == "" || cred.Audience == "" {
 		return ErrDenied
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+	defer cancel()
+	revision, e := c.catalogRevision(ctx, b, s.Method)
+	if e != nil {
+		return ErrDenied
+	}
 	var nonce [24]byte
 	if _, e := rand.Read(nonce[:]); e != nil {
 		return ErrDenied
 	}
 	w := c.request(b, s, cred, base64.RawURLEncoding.EncodeToString(nonce[:]))
+	w.PEPPolicyRevision = revision
 	data, e := json.Marshal(w)
 	if e != nil {
 		return ErrDenied
@@ -217,6 +229,343 @@ func (c *Client) Check(ctx context.Context, operation string, s ActualSnapshot, 
 		return ErrDenied
 	}
 	return nil
+}
+
+func (c *Client) catalogRevision(ctx context.Context, b Binding, method string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.config.BaseURL, "/")+"/api/v2/http-capabilities/catalog/"+c.config.ProviderID, nil)
+	if err != nil {
+		return 0, ErrDenied
+	}
+	req.Header.Set("X-Grant-App-Auth-Key", c.appKey)
+	res, err := c.http.Do(req)
+	if err != nil {
+		return 0, ErrDenied
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return 0, ErrDenied
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 {
+		return 0, ErrDenied
+	}
+	return c.validateCatalog(data, b, method, time.Now())
+}
+
+func (c *Client) validateCatalog(data []byte, b Binding, method string, now time.Time) (int64, error) {
+	m, ok := strictObject(data)
+	if !ok {
+		return 0, ErrDenied
+	}
+	for key := range m {
+		switch key {
+		case "schemaVersion", "authorizationMode", "pepPolicyRevision", "providerId", "pepClientId", "generation", "catalogDigest", "capabilities", "issuedAt", "expiresAt", "responseResources":
+		default:
+			return 0, ErrDenied
+		}
+	}
+	for key, value := range map[string]any{"schemaVersion": uint64(1), "authorizationMode": "user", "providerId": c.config.ProviderID, "pepClientId": c.config.PEPClientID, "generation": uint64(c.config.CatalogGeneration), "catalogDigest": c.config.CatalogDigest} {
+		want, _ := json.Marshal(value)
+		if !bytes.Equal(bytes.TrimSpace(m[key]), want) {
+			return 0, ErrDenied
+		}
+	}
+	var revision int64
+	var issued, expires time.Time
+	if json.Unmarshal(m["pepPolicyRevision"], &revision) != nil || revision <= 0 || json.Unmarshal(m["issuedAt"], &issued) != nil || issued.IsZero() || json.Unmarshal(m["expiresAt"], &expires) != nil || !expires.After(now) || !expires.After(issued) || expires.Sub(issued) > 30*time.Second {
+		return 0, ErrDenied
+	}
+	var capabilities []json.RawMessage
+	if json.Unmarshal(m["capabilities"], &capabilities) != nil || capabilities == nil {
+		return 0, ErrDenied
+	}
+	found := false
+	for _, raw := range capabilities {
+		capability, ok := strictObject(raw)
+		if !ok {
+			return 0, ErrDenied
+		}
+		var id string
+		if json.Unmarshal(capability["capabilityId"], &id) != nil || id == "" {
+			return 0, ErrDenied
+		}
+		if id != b.CapabilityID {
+			continue
+		}
+		if found {
+			return 0, ErrDenied
+		}
+		found = true
+		for key := range capability {
+			switch key {
+			case "capabilityId", "version", "enabled", "accessMode", "method", "pathTemplate", "actionId", "resource", "query", "request", "response", "contractDigest", "pathParameters", "recordScope", "batch", "responseAuthorization", "organizationContext":
+			default:
+				return 0, ErrDenied
+			}
+		}
+		computed, err := selectedContractDigest(raw)
+		if err != nil || computed != b.ContractDigest {
+			return 0, ErrDenied
+		}
+		// These contracts require follow-up enforcement this consumer does not implement.
+		for _, key := range []string{"recordScope", "batch", "responseAuthorization"} {
+			if _, present := capability[key]; present {
+				return 0, ErrDenied
+			}
+		}
+		for key, value := range map[string]any{"version": uint64(b.CapabilityVersion), "enabled": true, "accessMode": "authorized", "method": method, "actionId": b.ActionID, "contractDigest": b.ContractDigest} {
+			want, _ := json.Marshal(value)
+			if !bytes.Equal(bytes.TrimSpace(capability[key]), want) {
+				return 0, ErrDenied
+			}
+		}
+		var path string
+		if json.Unmarshal(capability["pathTemplate"], &path) != nil || !strings.HasPrefix(path, "/") {
+			return 0, ErrDenied
+		}
+		resource, ok := strictObject(capability["resource"])
+		wantType, _ := json.Marshal(b.ResourceType)
+		if !ok || !bytes.Equal(bytes.TrimSpace(resource["type"]), wantType) {
+			return 0, ErrDenied
+		}
+		extractor, ok := strictObject(resource["id"])
+		if !ok {
+			return 0, ErrDenied
+		}
+		var kind string
+		if json.Unmarshal(extractor["kind"], &kind) != nil {
+			return 0, ErrDenied
+		}
+		switch kind {
+		case "constant":
+			var value string
+			if len(extractor) != 2 || json.Unmarshal(extractor["value"], &value) != nil || value != b.ResourceID || b.ResourceEvidence.Kind != "constant" {
+				return 0, ErrDenied
+			}
+		case "pathSegment", "queryScalar", "jsonPointer":
+			field := "name"
+			if kind == "jsonPointer" {
+				field = "pointer"
+			}
+			var name, format string
+			if len(extractor) != 3 || json.Unmarshal(extractor[field], &name) != nil || name == "" || json.Unmarshal(extractor["format"], &format) != nil || format == "" {
+				return 0, ErrDenied
+			}
+		default:
+			return 0, ErrDenied
+		}
+		if raw, present := capability["organizationContext"]; present {
+			var organizationContext string
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &organizationContext) != nil {
+				return 0, ErrDenied
+			}
+		}
+		// Validate supported shapes without compiling route or extractor behavior.
+		for _, key := range []string{"query", "request", "response"} {
+			if _, ok := strictObject(capability[key]); !ok {
+				return 0, ErrDenied
+			}
+		}
+		query, _ := strictObject(capability["query"])
+		var mode string
+		if json.Unmarshal(query["mode"], &mode) != nil || (mode != "none" && mode != "exact") {
+			return 0, ErrDenied
+		}
+		if mode == "exact" {
+			var parameters []json.RawMessage
+			if json.Unmarshal(query["parameters"], &parameters) != nil || parameters == nil {
+				return 0, ErrDenied
+			}
+			for _, raw := range parameters {
+				fields, ok := strictObject(raw)
+				var parameter struct {
+					Name     string  `json:"name"`
+					Format   string  `json:"format"`
+					Required *bool   `json:"required"`
+					MaxBytes *uint64 `json:"maxBytes"`
+					Repeated *bool   `json:"repeated"`
+				}
+				if !ok || fields["name"] == nil || fields["format"] == nil || fields["required"] == nil || json.Unmarshal(raw, &parameter) != nil || parameter.Name == "" || parameter.Format == "" || parameter.Required == nil {
+					return 0, ErrDenied
+				}
+			}
+		}
+		if raw, present := capability["pathParameters"]; present {
+			var parameters []json.RawMessage
+			if json.Unmarshal(raw, &parameters) != nil || parameters == nil {
+				return 0, ErrDenied
+			}
+			for _, raw := range parameters {
+				fields, ok := strictObject(raw)
+				var parameter struct {
+					Name     string  `json:"name"`
+					Format   string  `json:"format"`
+					MaxBytes *uint64 `json:"maxBytes"`
+				}
+				if !ok || fields["name"] == nil || fields["format"] == nil || fields["maxBytes"] == nil || json.Unmarshal(raw, &parameter) != nil || parameter.Name == "" || parameter.Format == "" || parameter.MaxBytes == nil {
+					return 0, ErrDenied
+				}
+			}
+		}
+		for _, key := range []string{"request", "response"} {
+			contract, ok := strictObject(capability[key])
+			if !ok {
+				return 0, ErrDenied
+			}
+			var maxBytes uint64
+			var headers []json.RawMessage
+			if bytes.Equal(bytes.TrimSpace(contract["maxBytes"]), []byte("null")) || json.Unmarshal(contract["maxBytes"], &maxBytes) != nil || contract["forwardHeaders"] == nil || json.Unmarshal(contract["forwardHeaders"], &headers) != nil {
+				return 0, ErrDenied
+			}
+			for _, raw := range headers {
+				var name string
+				if json.Unmarshal(raw, &name) != nil || name == "" {
+					return 0, ErrDenied
+				}
+			}
+			field := "body"
+			if key == "response" {
+				field = "redirects"
+			}
+			var value string
+			if bytes.Equal(bytes.TrimSpace(contract[field]), []byte("null")) || json.Unmarshal(contract[field], &value) != nil {
+				return 0, ErrDenied
+			}
+		}
+	}
+	if !found {
+		return 0, ErrDenied
+	}
+	return revision, nil
+}
+
+// Only the selected server-serialized capability is hashed, not the catalog envelope.
+func selectedContractDigest(data []byte) (string, error) {
+	if !utf8.Valid(data) || len(bytes.TrimSpace(data)) == 0 || bytes.TrimSpace(data)[0] != '{' {
+		return "", ErrDenied
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	canonical, err := canonicalContractValue(d, true)
+	if err != nil {
+		return "", ErrDenied
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return "", ErrDenied
+	}
+	return Digest(canonical), nil
+}
+
+func canonicalContractValue(d *json.Decoder, root bool) ([]byte, error) {
+	token, err := d.Token()
+	if err != nil {
+		return nil, ErrDenied
+	}
+	switch value := token.(type) {
+	case json.Delim:
+		switch value {
+		case '{':
+			fields := map[string][]byte{}
+			seen := map[string]bool{}
+			for d.More() {
+				keyToken, err := d.Token()
+				key, ok := keyToken.(string)
+				if err != nil || !ok || seen[strings.ToLower(key)] {
+					return nil, ErrDenied
+				}
+				seen[strings.ToLower(key)] = true
+				encoded, err := canonicalContractValue(d, false)
+				if err != nil {
+					return nil, ErrDenied
+				}
+				if !root || key != "contractDigest" {
+					fields[key] = encoded
+				}
+			}
+			if end, err := d.Token(); err != nil || end != json.Delim('}') {
+				return nil, ErrDenied
+			}
+			keys := make([]string, 0, len(fields))
+			for key := range fields {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			out := []byte{'{'}
+			for i, key := range keys {
+				if i != 0 {
+					out = append(out, ',')
+				}
+				out = appendContractString(out, key)
+				out = append(out, ':')
+				out = append(out, fields[key]...)
+			}
+			return append(out, '}'), nil
+		case '[':
+			out := []byte{'['}
+			for i := 0; d.More(); i++ {
+				encoded, err := canonicalContractValue(d, false)
+				if err != nil {
+					return nil, ErrDenied
+				}
+				if i != 0 {
+					out = append(out, ',')
+				}
+				out = append(out, encoded...)
+			}
+			if end, err := d.Token(); err != nil || end != json.Delim(']') {
+				return nil, ErrDenied
+			}
+			return append(out, ']'), nil
+		}
+	case string:
+		return appendContractString(nil, value), nil
+	case json.Number:
+		number := string(value)
+		if strings.ContainsAny(number, ".eE") {
+			return nil, ErrDenied
+		}
+		if strings.HasPrefix(number, "-") {
+			if _, err := strconv.ParseInt(number, 10, 64); err != nil || number == "-0" {
+				return nil, ErrDenied
+			}
+		} else if _, err := strconv.ParseUint(number, 10, 64); err != nil {
+			return nil, ErrDenied
+		}
+		return []byte(number), nil
+	case bool:
+		return []byte(strconv.FormatBool(value)), nil
+	case nil:
+		return []byte("null"), nil
+	}
+	return nil, ErrDenied
+}
+
+func appendContractString(out []byte, value string) []byte {
+	out = append(out, '"')
+	for _, r := range value {
+		switch r {
+		case '"', '\\':
+			out = append(out, '\\', byte(r))
+		case '\b':
+			out = append(out, '\\', 'b')
+		case '\f':
+			out = append(out, '\\', 'f')
+		case '\n':
+			out = append(out, '\\', 'n')
+		case '\r':
+			out = append(out, '\\', 'r')
+		case '\t':
+			out = append(out, '\\', 't')
+		default:
+			if r < 0x20 {
+				const hex = "0123456789abcdef"
+				out = append(out, '\\', 'u', '0', '0', hex[byte(r)>>4], hex[byte(r)&15])
+			} else {
+				out = utf8.AppendRune(out, r)
+			}
+		}
+	}
+	return append(out, '"')
 }
 
 // Decode exact field names and reject duplicates, including case aliases. This
@@ -254,6 +603,9 @@ func strictObject(data []byte) (map[string]json.RawMessage, bool) {
 	return m, true
 }
 func validateResponse(data []byte, w wireRequest, action string, now time.Time) bool {
+	if w.WireVersion != 2 || w.PEPPolicyRevision <= 0 {
+		return false
+	}
 	m, ok := strictObject(data)
 	if !ok {
 		return false
@@ -278,8 +630,11 @@ func validateResponse(data []byte, w wireRequest, action string, now time.Time) 
 	var allowed bool
 	var reason, principal string
 	var issued, expires time.Time
-	if json.Unmarshal(m["allowed"], &allowed) != nil || !allowed || json.Unmarshal(m["reason"], &reason) != nil || reason == "" || json.Unmarshal(m["principalDigest"], &principal) != nil || !hexPattern.MatchString(principal) || json.Unmarshal(m["issuedAt"], &issued) != nil || json.Unmarshal(m["expiresAt"], &expires) != nil {
+	if bytes.Equal(bytes.TrimSpace(m["allowed"]), []byte("null")) || json.Unmarshal(m["allowed"], &allowed) != nil || json.Unmarshal(m["reason"], &reason) != nil || reason == "" || json.Unmarshal(m["principalDigest"], &principal) != nil || !hexPattern.MatchString(principal) || json.Unmarshal(m["issuedAt"], &issued) != nil || json.Unmarshal(m["expiresAt"], &expires) != nil {
 		return false
 	}
-	return !issued.IsZero() && !issued.After(now) && expires.After(now) && expires.After(issued) && expires.Sub(issued) <= 5*time.Second
+	if issued.IsZero() || issued.After(now) || !expires.After(now) || !expires.After(issued) || expires.Sub(issued) > 5*time.Second {
+		return false
+	}
+	return allowed
 }

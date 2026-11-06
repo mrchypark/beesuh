@@ -26,15 +26,15 @@ Beesuh opens a loopback single-node peer (`Local` remains false), not managed HA
 
 ## Candidate verification and limits
 
-The [first candidate CI run, 42120769680](https://github.com/mrchypark/beesuh/actions/runs/42120769680), at head `7a293c6`, failed only the new test's concrete `*sqlite3.Error` assumption; its context-identity assertions and Docker smoke passed. Independent inspection of the pinned go-sqlite3 v0.35.3 public API confirmed that an `ExtendedErrorCode` is also a valid driver error. The corrected test uses `errors.Is(err, sqlite3.INTERRUPT)` while retaining the driver check and invalid-SQL negative case. This is a test-oracle correction, not evidence of a v0.23.0 runtime failure. No subsequent candidate result is recorded here.
+The [first candidate CI run, 42120769680](https://github.com/mrchypark/beesuh/actions/runs/42120769680), at head `7a293c6`, failed only the new test's concrete `*sqlite3.Error` assumption; its context-identity assertions and Docker smoke passed. Independent inspection of the pinned go-sqlite3 v0.35.3 public API confirmed that an `ExtendedErrorCode` is also a valid driver error. The corrected test uses `errors.Is(err, sqlite3.INTERRUPT)` while retaining the driver check and invalid-SQL negative case. This is a test-oracle correction, not evidence of a v0.23.0 runtime failure.
 
-Remote candidate CI must establish:
+The [final candidate CI run, 42122655777](https://github.com/mrchypark/beesuh/actions/runs/42122655777), at exact head `3da2ddc8b153128d20e3b44533caad823dfdc58d`, passed. Successful jobs covered release-ref, Bun plugin tests, Go formatting/vet/normal/race tests, the CGo-free darwin/arm64 cross-build, retained v0.22.0 local data, and linux/amd64 Docker build/smoke. Image publication was skipped on this PR run; this is not published-image or live-deployment acceptance.
 
 The baseline negative control establishes a completed context and a public Query `ErrInvalidRequest` that lost the context sentinel, not the exact SQL VM start time; the candidate checks context identity, public `errors.Is(err, sqlite3.INTERRUPT)`, and HTTP controls.
 
 - Real interrupted Query errors preserve context and driver identity, reach Beesuh's HTTP 504 mapping, and leave subsequent queries healthy; invalid SQL remains an ordinary error.
 - Transaction rollback and expected-row rejection remain atomic; ambiguous mutation outcomes retain the existing uncertainty handling without automatic resubmission.
 - The cross-version helper seeds run/history/session data under v0.22.0, then checks replay without duplicate model dispatch and conversation continuation after SIGKILL and v0.23.0 reopen. It does not seed or verify pre-existing connection, cancellation, or recovery-fence records across versions.
-- The full normal/race suite covers connection isolation, cancellation, and recovery-fence regressions within the candidate version separately. The linux/amd64 Docker smoke and darwin/arm64 cross-build must also pass.
+- The full normal/race suite covers connection isolation, cancellation, and recovery-fence regressions within the candidate version separately. The linux/amd64 Docker smoke and darwin/arm64 cross-build also passed. These existing regressions are not new distributed-fencing or BeforeAck/RPO0 release gates.
 
 These checks cover retained local data, not remote-archive recovery or empty-directory disaster recovery. No archive, performance non-regression, production-cloud parity, or downgrade compatibility claim is made. Test old data through disposable copies; reverse-version reopen remains unqualified. No local builds, tests, or shared-cache writes were performed; a read-only `go version` check is outside those restrictions.

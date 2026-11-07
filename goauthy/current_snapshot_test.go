@@ -81,7 +81,8 @@ func TestSnapshotUsesDefaultTransportWhenBaseClientIsNil(t *testing.T) {
 	defer server.Close()
 	req, _ := http.NewRequest("POST", server.URL+"/chat", nil)
 	base := clone(nil)
-	client := &http.Client{Transport: &apiKeySnapshotTransport{destination: &apiKeyTransport{endpoint: req.URL, binding: APIKeyBinding{Header: "Authorization", Prefix: "Bearer "}, provider: base.Transport}, key: "secret", expires: time.Now().Add(time.Minute).UnixMilli()}}
+	source := func(context.Context) (string, error) { return "human", nil }
+	client := &http.Client{Transport: &apiKeySnapshotTransport{destination: &apiKeyTransport{endpoint: req.URL, binding: APIKeyBinding{Header: "Authorization", Prefix: "Bearer "}, provider: base.Transport, source: source}, key: "secret", expires: time.Now().Add(time.Minute).UnixMilli()}}
 	response, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)

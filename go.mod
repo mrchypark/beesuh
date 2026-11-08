@@ -3,7 +3,7 @@ module github.com/mrchypark/beesuh
 go 1.27.3
 
 require (
-	github.com/mrchypark/rhiza v0.23.0
+	github.com/mrchypark/rhiza v0.23.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/oauth2 v0.36.0
 )

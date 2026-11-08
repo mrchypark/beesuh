@@ -5,7 +5,7 @@
 
 ## 런타임과 저장 경로
 
-현재 소스는 Rhiza v0.23.0(커밋 `f050d6e30f57718736c8c4fdb5edef777183bc05`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
+현재 소스는 Rhiza v0.23.3(커밋 `fd323dbb37ad86c614eb0983c406adbccd16acba`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
 `NodeID`는 `beesuh`, `PeerAddr`는 `127.0.0.1:0`입니다. 피어 주소는 루프백의
 임시 포트이며 외부 서비스 주소로 사용하지 않습니다. `LocalArchive`와 `ObjStore`는
 설정하지 않습니다. 기본 `Local:false`는 단일 멤버 임베디드 voter 구성이며,
@@ -99,8 +99,8 @@ PVC 스냅샷은 정상 종료 절차를 거쳐 프로세스가 완전히 종료
 주장하지 않습니다.
 
 기존 저장 형식이나 아카이브를 자동으로 이전하는 절차는 제공하지 않습니다.
-v0.22.0 → v0.23.0의 보존된 DataDir 재열기는 아래 범위에서 검증했습니다.
-그 외 버전은 README의 업그레이드 안내를 확인하고 기존 데이터,
+v0.23.0에서 만든 DataDir를 v0.23.3으로 다시 여는 검사는 아래 범위를 다룹니다.
+업그레이드하기 전에 README의 안내를 확인하고 기존 데이터,
 아카이브와 이전 바이너리를 보존하세요. 여기서 말하는 자동 이전 미지원은 기존
 Rhiza 저장 형식의 변환에 관한 것으로, 런타임의 애플리케이션 스키마 migration
 호출과는 구분합니다. 기존 파일을 복사해 호환성이 확인되었다고 판단하지 마세요.
@@ -157,16 +157,14 @@ BeforeAck/RPO0나 분산 fencing을 새 릴리스 조건으로 요구하지 않�
 ## 검증 범위
 
 이 문서는 현재 소스와 커밋이 고정된 Rhiza 공식 문서를 대조한 운영 안내입니다.
-Rhiza 모듈은 `v0.23.0`입니다. 후보 커밋
-`3da2ddc8b153128d20e3b44533caad823dfdc58d`의
-[CI 42122655777](https://github.com/mrchypark/beesuh/actions/runs/42122655777)에서
-gofmt, vet, 전체 일반·race 테스트, Darwin arm64 CGo-free 빌드와
-linux/amd64 Docker 빌드·스모크가 통과했습니다.
-별도 교차 버전 검사는 v0.22.0에서 실행·history·session을 만든 뒤 SIGKILL하고,
-보존된 DataDir를 v0.23.0으로 재열어 중복 모델 호출 없는 결과 재사용과
-대화 계속하기를 확인했습니다. 기존 connection·cancellation·recovery-fence
-레코드의 교차 버전 검증이나 다운그레이드 검증은 아닙니다.
-상세 범위는 [v0.23.0 평가](rhiza-0.23.0-assessment.md)를 참고하세요.
+CI는 Go 코드 형식, vet, 일반 테스트와 race 테스트, CGo 없이 빌드하는
+Darwin arm64 바이너리, linux/amd64 Docker 빌드와 스모크 테스트를 검사합니다.
+별도 교차 버전 검사에서는 v0.23.0으로 실행·대화 기록·세션을 만든 프로세스를
+SIGKILL로 종료합니다. 같은 DataDir를 v0.23.3으로 열어 모델을 다시 호출하지 않고
+결과를 재사용하는지, 복구한 대화 기록으로 새 실행을 이어갈 수 있는지 확인합니다.
+이 검사는 기존 connection·cancellation·recovery-fence 레코드의 교차 버전 호환성과
+다운그레이드를 다루지 않습니다. 후보 커밋의 검사 결과는 해당 PR에서 확인하세요.
+상세 범위는 [v0.23.3 평가](rhiza-0.23.3-assessment.md)를 참고하세요.
 
 Docker CI는 동일 볼륨을 사용하는 init과 메인 실행 및 TLS 인증을 검사합니다.
 해당 버전의 실제 검사 결과는 릴리스 CI와 릴리스 노트에서 확인하세요.

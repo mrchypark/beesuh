@@ -5,7 +5,7 @@
 
 ## 런타임과 저장 경로
 
-현재 소스는 Rhiza v0.23.3(커밋 `fd323dbb37ad86c614eb0983c406adbccd16acba`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
+현재 소스는 Rhiza v0.24.0(커밋 `e9cefbbb260d2f62b2a47971de3f091720b42a68`)을 사용합니다. Beesuh가 `rhiza.Open`을 호출하며,
 `NodeID`는 `beesuh`, `PeerAddr`는 `127.0.0.1:0`입니다. 피어 주소는 루프백의
 임시 포트이며 외부 서비스 주소로 사용하지 않습니다. `LocalArchive`와 `ObjStore`는
 설정하지 않습니다. 기본 `Local:false`는 단일 멤버 임베디드 voter 구성이며,
@@ -99,7 +99,7 @@ PVC 스냅샷은 정상 종료 절차를 거쳐 프로세스가 완전히 종료
 주장하지 않습니다.
 
 기존 저장 형식이나 아카이브를 자동으로 이전하는 절차는 제공하지 않습니다.
-v0.23.0에서 만든 DataDir를 v0.23.3으로 다시 여는 검사는 아래 범위를 다룹니다.
+v0.23.3에서 만든 DataDir를 v0.24.0으로 다시 여는 검사는 아래 범위를 다룹니다.
 업그레이드하기 전에 README의 안내를 확인하고 기존 데이터,
 아카이브와 이전 바이너리를 보존하세요. 여기서 말하는 자동 이전 미지원은 기존
 Rhiza 저장 형식의 변환에 관한 것으로, 런타임의 애플리케이션 스키마 migration
@@ -146,9 +146,11 @@ init은 shell 없이 `/usr/local/bin/beesuh -storage-init -data-dir /data/beesuh
 루트를 지정하세요. `runtime.lock`을 삭제해 실행을 강제하지 마세요.
 
 Rhiza SDK의 object-store 기능은 Beesuh 바이너리의 설정 기능과 구분해야 합니다.
-이번 업그레이드는 아카이브 연결이나 PVC 없는 복구 기능을 추가하지 않습니다.
-이번 브랜치 밖에 보존된 기존 DR WIP는 이번 변경에 포함하지 않으며,
-BeforeAck/RPO0나 분산 fencing을 새 릴리스 조건으로 요구하지 않습니다.
+Rhiza는 [단일 노드 아카이브 복구](https://github.com/mrchypark/rhiza/blob/v0.24.0/docs/local-init-container-recovery.md)를 지원합니다.
+이 기능을 사용하려면 `Local: true`와 객체 스토리지를 설정하고, init과 메인 컨테이너에
+같은 저장소 설정과 DataDir를 전달해야 합니다. 새 writer를 시작하기 전에 기존 writer가
+중지되었는지도 확인해야 합니다. Beesuh에는 이 설정이 연결되어 있지 않으므로 PVC를
+잃은 뒤 객체 스토리지에서 복구할 수 없습니다.
 
 단일 replica와 볼륨 접근 모드는 fencing이 아닙니다. Pod 강제 삭제만으로 이전
 프로세스의 종료를 판단하지 마세요. 교체 writer를 시작하기 전에 이전 writer가
@@ -159,12 +161,12 @@ BeforeAck/RPO0나 분산 fencing을 새 릴리스 조건으로 요구하지 않�
 이 문서는 현재 소스와 커밋이 고정된 Rhiza 공식 문서를 대조한 운영 안내입니다.
 CI는 Go 코드 형식, vet, 일반 테스트와 race 테스트, CGo 없이 빌드하는
 Darwin arm64 바이너리, linux/amd64 Docker 빌드와 스모크 테스트를 검사합니다.
-별도 교차 버전 검사에서는 v0.23.0으로 실행·대화 기록·세션을 만든 프로세스를
-SIGKILL로 종료합니다. 같은 DataDir를 v0.23.3으로 열어 모델을 다시 호출하지 않고
+별도 교차 버전 검사에서는 v0.23.3으로 실행·대화 기록·세션을 만든 프로세스를
+SIGKILL로 종료합니다. 같은 DataDir를 v0.24.0으로 열어 모델을 다시 호출하지 않고
 결과를 재사용하는지, 복구한 대화 기록으로 새 실행을 이어갈 수 있는지 확인합니다.
 이 검사는 기존 connection·cancellation·recovery-fence 레코드의 교차 버전 호환성과
 다운그레이드를 다루지 않습니다. 후보 커밋의 검사 결과는 해당 PR에서 확인하세요.
-상세 범위는 [v0.23.3 평가](rhiza-0.23.3-assessment.md)를 참고하세요.
+상세 범위는 [v0.24.0 평가](rhiza-0.24.0-assessment.md)를 참고하세요.
 
 Docker CI는 동일 볼륨을 사용하는 init과 메인 실행 및 TLS 인증을 검사합니다.
 해당 버전의 실제 검사 결과는 릴리스 CI와 릴리스 노트에서 확인하세요.

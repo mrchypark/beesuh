@@ -1,9 +1,9 @@
 module github.com/mrchypark/beesuh
 
-go 1.27.3
+go 1.27.4
 
 require (
-	github.com/mrchypark/rhiza v0.23.3
+	github.com/mrchypark/rhiza v0.24.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/oauth2 v0.36.0
 )
@@ -68,7 +68,7 @@ require (
 	github.com/minio/crc64nvme v1.0.2 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/minio-go/v7 v7.0.95 // indirect
-	github.com/mrchypark/latticedb-go v0.11.3 // indirect
+	github.com/mrchypark/latticedb-go v0.13.0 // indirect
 	github.com/ncruces/go-sqlite3 v0.35.3 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v3 v3.2.35304 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect

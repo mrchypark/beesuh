@@ -1,9 +1,0 @@
-# Rhiza v0.24.0 consumer assessment
-
-Baseline: Beesuh main `5fc58f92e059ca1ad71c2ccc334518811c35bc49`, with Rhiza v0.23.3 and LatticeDB Go v0.11.3.
-
-The parent artifact gate confirmed [Rhiza v0.24.0](https://github.com/mrchypark/rhiza/releases/tag/v0.24.0) at `e9cefbbb260d2f62b2a47971de3f091720b42a68`, the published [Rhiza](https://sum.golang.org/lookup/github.com/mrchypark/rhiza@v0.24.0) and [LatticeDB Go v0.13.0](https://sum.golang.org/lookup/github.com/mrchypark/latticedb-go@v0.13.0) module checksums, the embedded SQLite Wasm artifact, and the Go 1.27.4 toolchain and linux/amd64 Docker builder. The [Rhiza module manifest](https://proxy.golang.org/github.com/mrchypark/rhiza/@v/v0.24.0.mod) raises the Go floor to 1.27.4.
-
-Hosted CI builds the seed helper against the fixed baseline's original module manifests. After the seed commits run, history, and session records, the test kills it with SIGKILL and opens the same disposable DataDir under v0.24.0. It checks that replay makes no extra model call and that a new run uses the recovered history. The v0.22.0 Query cancellation oracle retains the baseline's other pins and still requires loss of the context cause in both modes. Candidate acceptance requires passing CI at the exact candidate commit. This fixture does not qualify cross-version connection, cancellation, or recovery-fence records, downgrade, or recovery after volume loss.
-
-The release's managed HA membership changes do not apply to Beesuh's embedded single voter. Both init and main open local storage with no object archive, and the Kubernetes example retains its PVC. [Rhiza's single-node archive recovery](https://github.com/mrchypark/rhiza/blob/v0.24.0/docs/local-init-container-recovery.md) requires Local mode, a configured archive, matching init and main storage settings, and external exclusion of the old writer. Beesuh does not provide PVC-less object recovery with its current wiring.

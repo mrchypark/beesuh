@@ -45,14 +45,14 @@ go run ./cmd/beesuh \
 
 ### 기존 Rhiza 데이터의 업그레이드
 
-Beesuh는 [Rhiza v0.24.0](https://github.com/mrchypark/rhiza/releases/tag/v0.24.0)
-(커밋 `e9cefbbb260d2f62b2a47971de3f091720b42a68`)으로 버전을 고정합니다.
+Beesuh는 [Rhiza v0.27.3](https://github.com/mrchypark/rhiza/releases/tag/v0.27.3)
+(커밋 `234602aeb1783f11f1e878a5e1a4793ff7a473d6`)으로 버전을 고정합니다.
 CI는 v0.23.3에서 실행·대화 데이터를 만든 프로세스를 SIGKILL로 종료한 뒤,
-v0.24.0으로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
+v0.27.3으로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
 있는지 검사합니다. 후보 커밋의 검사 결과는 해당 PR에서 확인하세요.
 이전 데이터와 바이너리를 보존하고 복사본으로 검증하세요. 다운그레이드는
 검사 범위에 포함되지 않습니다.
-자세한 범위와 근거는 [v0.24.0 평가](docs/rhiza-0.24.0-assessment.md)를 참고하세요.
+자세한 범위와 근거는 [v0.27.3 평가](docs/rhiza-0.27.3-assessment.md)를 참고하세요.
 다음은 더 오래된 저장 형식에 관한 별도 주의사항입니다.
 v0.21.1 문서가 설명하는 v0.21 계약에서는 모든 Local 아카이브
 형식(파일시스템, S3, GCS, Azure)을 변경하며, 자동 마이그레이션이나 기존 아카이브를

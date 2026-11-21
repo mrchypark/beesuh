@@ -98,7 +98,7 @@ jobs:
             grep -F -- "--- FAIL: TestRhizaQueryCancellationKeepsHTTPCategory/$mode (" "$work/baseline-query.log"
           done
           test "$(grep -c 'Query lost context cause:' "$work/baseline-query.log")" -eq 2
-      - name: Retained local data from Rhiza v0.23.3 to v0.24.0
+      - name: Retained local data from Rhiza v0.23.3 to v0.27.3
         shell: sh
         run: |
           set -eu
@@ -110,7 +110,7 @@ jobs:
           candidate=$(go list -mod=readonly -m -f '{{.Version}}' github.com/mrchypark/rhiza github.com/mrchypark/latticedb-go)
           printf 'Seed (Rhiza, LatticeDB Go):\n%s\nCandidate (Rhiza, LatticeDB Go):\n%s\n' "$seed" "$candidate"
           test "$seed" = "$(printf '%s\n' v0.23.3 v0.11.3)"
-          test "$candidate" = "$(printf '%s\n' v0.24.0 v0.13.0)"
+          test "$candidate" = "$(printf '%s\n' v0.27.3 v0.13.0)"
           go test -mod=readonly -modfile="$work/seed.mod" -c -o "$work/seed.test" .
           BEESUH_RECOVERY_SEED_BINARY="$work/seed.test" go test -mod=readonly -count=1 -timeout 120s -v -run '^TestSingleNodeDurableRecovery$' .
 

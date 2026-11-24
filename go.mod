@@ -3,7 +3,7 @@ module github.com/mrchypark/beesuh
 go 1.27.4
 
 require (
-	github.com/mrchypark/rhiza v0.27.4
+	github.com/mrchypark/rhiza v0.27.5
 	github.com/ncruces/go-sqlite3 v0.35.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/oauth2 v0.36.0

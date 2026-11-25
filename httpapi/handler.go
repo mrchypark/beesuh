@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -111,6 +112,7 @@ func newHandler(h handler) http.Handler {
 }
 
 func (h handler) chat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Vary", "Prefer")
 	in, err := decode(r.Body)
 	if err != nil {
 		if !errors.Is(err, errBodyTooLarge) {
@@ -123,7 +125,7 @@ func (h handler) chat(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, errors.Join(beesuh.ErrInvalidInput, err), beesuh.Result{State: "failed"})
 		return
 	}
-	out, err := h.runtime.Run(r.Context(), beesuh.Request{
+	req := beesuh.Request{
 		WorkspaceID:           in.WorkspaceID,
 		SessionKey:            in.SessionKey,
 		RequestID:             in.RequestID,
@@ -131,7 +133,12 @@ func (h handler) chat(w http.ResponseWriter, r *http.Request) {
 		ConnectionID:          in.ConnectionID,
 		ConductorConnectionID: in.ConductorConnectionID,
 		Prompt:                beesuh.Prompt{Text: in.Message},
-	})
+	}
+	if wantsAsync(r) {
+		h.enqueue(w, r, req)
+		return
+	}
+	out, err := h.runtime.Run(r.Context(), req)
 	if err != nil {
 		if out.State == "" {
 			out.State = "failed"
@@ -143,6 +150,7 @@ func (h handler) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) compos(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Vary", "Prefer")
 	producer, ok := beesuh.PrincipalFromContext(r.Context())
 	if !h.identity || !ok || h.composProducer == nil || h.composProducer(r.Context(), producer) != nil {
 		h.fail(w, beesuh.ErrForbidden, beesuh.Result{State: "failed"})
@@ -163,12 +171,34 @@ func (h handler) compos(w http.ResponseWriter, r *http.Request) {
 	in.Provider = provider
 	in.ConnectionID = connection
 	in.ConductorConnectionID = conductorConnection
+	if wantsAsync(r) {
+		h.enqueue(w, r, in)
+		return
+	}
 	out, err := h.runtime.Run(r.Context(), in)
 	if err != nil {
 		h.fail(w, err, out)
 		return
 	}
 	h.write(w, http.StatusOK, out)
+}
+
+func (h handler) enqueue(w http.ResponseWriter, r *http.Request, req beesuh.Request) {
+	out, err := h.runtime.Enqueue(r.Context(), req)
+	if err != nil {
+		if out.State == "" {
+			out.State = "failed"
+		}
+		h.fail(w, err, out)
+		return
+	}
+	w.Header().Set("Preference-Applied", "respond-async")
+	w.Header().Set("Location", "/v1/runs/"+url.PathEscape(req.RequestID)+"?"+url.Values{"workspace_id": {req.WorkspaceID}}.Encode())
+	status := http.StatusOK
+	if out.State == "queued" || out.State == "running" {
+		status = http.StatusAccepted
+	}
+	h.writeJSON(w, status, out)
 }
 
 func (h handler) providers(w http.ResponseWriter, r *http.Request) {

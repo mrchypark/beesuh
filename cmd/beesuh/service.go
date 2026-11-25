@@ -334,5 +334,7 @@ func (s *serviceConfig) configure(o *beesuh.Options) error {
 	o.RequireIdentity = true
 	o.Authorize = s.authorize
 	o.ResolveCredential = s.resolveDiscovered
+	// PrepareAsync stays unset: the human bearer is request-scoped and cannot
+	// authorize execution after a restart.
 	return nil
 }

@@ -19,7 +19,7 @@ Beesuh는 모델 API를 직접 호출하고 대화와 실행 기록을 로컬에
 
 ## 빠르게 시작하기
 
-소스에서 실행하려면 **Go 1.27.3 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
+소스에서 실행하려면 **Go 1.27.4 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
 필요합니다. 메모·스킬 도구를 사용하려면 모델이 tool calling도 지원해야 합니다.
 
 ```sh
@@ -45,14 +45,14 @@ go run ./cmd/beesuh \
 
 ### 기존 Rhiza 데이터의 업그레이드
 
-Beesuh는 [Rhiza v0.23.3](https://github.com/mrchypark/rhiza/releases/tag/v0.23.3)
-(커밋 `fd323dbb37ad86c614eb0983c406adbccd16acba`)으로 버전을 고정합니다.
-CI는 v0.23.0에서 실행·대화 데이터를 만든 프로세스를 SIGKILL로 종료한 뒤,
-v0.23.3으로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
+Beesuh는 [Rhiza v0.27.4](https://github.com/mrchypark/rhiza/releases/tag/v0.27.4)
+(커밋 `94e9ef3f29ddf52b3d543133bae3e3d8ba57558c`)으로 버전을 고정합니다.
+CI는 v0.23.3에서 실행·대화 데이터를 만든 프로세스를 SIGKILL로 종료한 뒤,
+v0.27.4로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
 있는지 검사합니다. 후보 커밋의 검사 결과는 해당 PR에서 확인하세요.
 이전 데이터와 바이너리를 보존하고 복사본으로 검증하세요. 다운그레이드는
 검사 범위에 포함되지 않습니다.
-자세한 범위와 근거는 [v0.23.3 평가](docs/rhiza-0.23.3-assessment.md)를 참고하세요.
+자세한 범위와 근거는 [v0.27.4 평가](docs/rhiza-0.27.4-assessment.md)를 참고하세요.
 다음은 더 오래된 저장 형식에 관한 별도 주의사항입니다.
 v0.21.1 문서가 설명하는 v0.21 계약에서는 모든 Local 아카이브
 형식(파일시스템, S3, GCS, Azure)을 변경하며, 자동 마이그레이션이나 기존 아카이브를
@@ -162,6 +162,16 @@ curl http://127.0.0.1:8080/v1/chat \
 `BEESUH_API_TOKEN`, 공용 모델 키, 로컬 Codex 로그인, Conductor 자격증명으로
 HTTP 인증이나 모델 연결을 대신할 수 없습니다. Go 라이브러리의 인증 콜백과
 로컬 CLI의 자격증명 설정은 그대로 사용할 수 있습니다.
+
+같은 /v1/chat과 /v1/compos 요청에 Prefer: respond-async를 보내면
+202 Accepted와 실행 조회용 상대 Location을 받습니다. 접수된 작업은
+Rhiza의 agent_tasks에 저장되고 단일 worker가 기존 실행 경로로 처리합니다.
+동일 요청이 이미 완료된 경우 비동기 재요청은 저장된 terminal 결과와 200을 받고,
+queued 또는 running인 동일 요청은 202를 받습니다.
+큐 재시작, 취소, 중복 판정과 호스트의 PrepareAsync 계약은
+[비동기 에이전트 작업](docs/async-agent-tasks.md)을 따르세요.
+현재 CLI 인증 서비스는 재시작 가능한 background credential 교환을 제공하지
+않으므로 비동기 접수를 503으로 거절합니다. 동기 요청은 그대로 동작합니다.
 
 ## Docker로 실행하기
 
@@ -329,7 +339,8 @@ workspace별 기본 한도는 run 10,000개, session·connection 각각 1,000개
 작업 상태를 확인한 뒤 같은 데이터·도구 설정으로 실행해야 합니다.
 자세한 내용은 [실패 복구와 저장 정책](docs/uncertainty-and-retention-policy.md)을 참고하세요.
 
-SSE·스트리밍, 일반 MCP, 동적 도구, 자동 요약·벡터 메모리, 호출별 승인 기능은
+비동기 HTTP 작업은 제공하지만 cron·event source, 백그라운드 event stream과 승인 inbox는
+제공하지 않습니다. SSE·스트리밍, 일반 MCP, 동적 도구, 자동 요약·벡터 메모리, 호출별 승인 기능은
 현재 제공하지 않습니다. 독립 실행에서 선택할 수 있는 도구는 메모와 정적 스킬 읽기입니다.
 기존 OpenCode 서버를 사용하는 `-backend opencode`도 남아 있지만 native 메모와
 journal 조회는 지원하지 않으며, 기존 session을 native로 자동 이관하지 않습니다.

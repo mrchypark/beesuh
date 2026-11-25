@@ -85,15 +85,24 @@ func (r *Runtime) CancelRun(ctx context.Context, workspace, request string) (Res
 	if err != nil {
 		return Result{}, err
 	}
+	taskRows, err := r.query(ctx, `SELECT state FROM agent_tasks WHERE workspace=? AND request_id=?`, workspace, request)
+	if err != nil {
+		return Result{}, err
+	}
+	taskState := ""
+	if len(taskRows) != 0 {
+		taskState = taskRows[0][0].(string)
+	}
 	controls := r.controls[cancellationKey(workspace, request)]
-	if len(rows) == 0 && len(controls) == 0 && !requested {
+	if len(rows) == 0 && len(controls) == 0 && taskState == "" && !requested {
 		return Result{}, ErrNotFound
 	}
 	if !requested {
 		// Bound tombstones independently, including queued requests without runs.
 		err = r.mutate(ctx, []rhiza.SQLStatement{{SQL: `INSERT INTO run_cancellations(workspace,request_id,recorded_at)
 SELECT ?,?,? WHERE (SELECT COUNT(*) FROM run_cancellations WHERE workspace=?) < ? AND (SELECT COUNT(*) FROM run_cancellations) < ?`,
-			Args: []any{workspace, request, time.Now().Unix(), workspace, r.capacity.RunsPerWorkspace, r.capacity.RunsGlobal}, ExpectedRowsAffected: one()}})
+			Args: []any{workspace, request, time.Now().Unix(), workspace, r.capacity.RunsPerWorkspace, r.capacity.RunsGlobal}, ExpectedRowsAffected: one()},
+			{SQL: `DELETE FROM agent_tasks WHERE workspace=? AND request_id=? AND state!='running'`, Args: []any{workspace, request}}})
 		if err != nil {
 			// A failed acknowledgement can follow a commit. If confirmation also
 			// fails, fence and stop work rather than allow an ambiguous dispatch.
@@ -118,7 +127,7 @@ SELECT ?,?,? WHERE (SELECT COUNT(*) FROM run_cancellations WHERE workspace=?) < 
 	for c := range controls {
 		c.cancel()
 	}
-	if len(rows) != 0 {
+	if len(rows) != 0 || taskState == "running" {
 		return Result{RequestID: request, State: "running", CancellationRequested: true}, nil
 	}
 	return cancelledResult(request), nil

@@ -221,6 +221,14 @@ curl http://127.0.0.1:8080/v1/chat \
   -d '{"workspace_id":"<returned-workspace-id>","session_key":"chat-1","request_id":"http-1","connection_id":"<returned-id>","message":"Hello"}'
 ```
 
+Adding Prefer: respond-async returns 202 Accepted with a relative run
+Location. The CLI service has no restart-safe background credential exchange,
+so this mode currently fails closed with HTTP 503. A host that embeds Beesuh can
+set Options.PrepareAsync; see
+[Asynchronous agent tasks](async-agent-tasks.md).
+An identical request whose run is already terminal returns 200 with the stored
+result; queued or running duplicates return 202.
+
 Standards: [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662),
 [OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo), and
 [RFC 6749 client authentication](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1).

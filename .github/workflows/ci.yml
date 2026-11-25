@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.27.x"]
+        go: ["1.27.4"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,7 +94,7 @@ jobs:
             grep -F -- "--- FAIL: TestRhizaQueryCancellationKeepsHTTPCategory/$mode (" "$work/baseline-query.log"
           done
           test "$(grep -c 'Query lost context cause:' "$work/baseline-query.log")" -eq 2
-      - name: Retained local data from Rhiza v0.23.0 to v0.23.3
+      - name: Retained local data from Rhiza v0.23.3 to v0.27.4
         shell: sh
         run: |
           set -eu
@@ -102,13 +102,13 @@ jobs:
           trap 'rm -rf "$work"' EXIT
           cp go.mod "$work/seed.mod"
           cp go.sum "$work/seed.sum"
-          go mod edit -modfile="$work/seed.mod" -require=github.com/mrchypark/rhiza@v0.23.0
+          go mod edit -modfile="$work/seed.mod" -require=github.com/mrchypark/rhiza@v0.23.3
           go mod download -modfile="$work/seed.mod" github.com/mrchypark/rhiza
           seed=$(go list -mod=readonly -modfile="$work/seed.mod" -m -f '{{.Version}}' github.com/mrchypark/rhiza)
           candidate=$(go list -mod=readonly -m -f '{{.Version}}' github.com/mrchypark/rhiza)
           printf 'Rhiza seed=%s verify=%s\n' "$seed" "$candidate"
-          test "$seed" = v0.23.0
-          test "$candidate" = v0.23.3
+          test "$seed" = v0.23.3
+          test "$candidate" = v0.27.4
           go test -mod=readonly -modfile="$work/seed.mod" -c -o "$work/seed.test" .
           BEESUH_RECOVERY_SEED_BINARY="$work/seed.test" go test -mod=readonly -count=1 -timeout 120s -v -run '^TestSingleNodeDurableRecovery$' .
 

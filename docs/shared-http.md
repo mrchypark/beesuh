@@ -519,7 +519,12 @@ not a supported Bee query key. Chat and selection POSTs additionally require
    }
    ```
 
-   Chat waits for completion; it is not an asynchronous HTTP 202 submission.
+   Chat waits for completion by default. Prefer: respond-async requests a
+   durable 202 Accepted task and a relative run Location; this currently
+   fails closed with 503 in the CLI service because it has no restart-safe
+   background credential exchange. Embedded hosts can supply
+   Options.PrepareAsync as described in
+   [Asynchronous agent tasks](async-agent-tasks.md).
    A successful HTTP 200 response has this shape (generated IDs are placeholders):
 
    ```json

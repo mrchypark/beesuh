@@ -93,6 +93,9 @@ go run ./cmd/beesuh \
 `-listen`에는 `-service-config`와 `-providers`가 필요하며 backend는 `native`여야 합니다.
 서비스 설정과 자격증명이 없는 provider 설정은
 [OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
+The linked guide also distinguishes Beesuh's local Goauthy delivery and injected
+HTTP clients from an official SDK, and separates model execution from the
+Conductor/Exposure/Grant SaaS integration target.
 
 For the shared organization/workspace profile, see
 [shared HTTP configuration and UI routes](docs/shared-http.md). It keeps the

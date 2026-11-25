@@ -40,6 +40,7 @@ type APIKeyBinding struct {
 // under the pinned grant/provider/generation/digest. Callers must use the returned
 // version in their model account boundary before constructing model state. The
 // returned client uses that same memory-only snapshot, never a second delivery.
+// source must recheck current authority; it is called again before each dispatch.
 // Call only after authorization and execution admission, not during provisioning.
 func ResolveCurrentAPIKey(ctx context.Context, issuer string, binding APIKeyBinding, source func(context.Context) (string, error), issuerClient, providerClient *http.Client) (*http.Client, int64, error) {
 	if binding.CredentialVersion != 0 {
@@ -73,6 +74,16 @@ func (t *apiKeySnapshotTransport) RoundTrip(r *http.Request) (*http.Response, er
 			_ = r.Body.Close()
 		}
 		return nil, err
+	}
+	token, err := t.destination.source(r.Context())
+	if err == nil && (token == "" || len(token) > 8192 || strings.ContainsAny(token, "\r\n\x00")) {
+		err = auth.ErrInvalidCredentials
+	}
+	if err != nil {
+		if r.Body != nil {
+			_ = r.Body.Close()
+		}
+		return nil, auth.Sanitize(err)
 	}
 	if time.Now().UnixMilli() >= t.expires {
 		if r.Body != nil {

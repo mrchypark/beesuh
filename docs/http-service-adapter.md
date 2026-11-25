@@ -6,6 +6,62 @@ require an external Beesuh-specific `/authenticate`, `/authorize`, or
 adds its own discovery/selection routes; no Goauthy endpoint is added.
 Custom authority configuration is rejected.
 
+## Credential delivery and injected HTTP clients
+
+The common pattern is: verify the original human request and approved Goauthy
+connection, deliver the external credential into request-local memory, then
+inject a credential-bound HTTP client into the existing model adapter.
+`cmd/beesuh/discovery.go` returns `beesuh.Credential.HTTPClient`; the model uses
+`model.Config.HTTPClient`. The `github.com/mrchypark/beesuh/goauthy` package is
+Beesuh's local delivery/transport implementation, not an official Goauthy SDK.
+No AMP package or authenticated-client interface is imported or required for
+LLM calls. An AMP-style authenticated interface is only a comparable design
+pattern, not an implemented dependency or replacement API.
+
+This preserves the v0.6.0 public flow: `GET /v1/connection-options`,
+`POST /v1/connections`, then `POST /v1/chat`, using the same incoming human
+Bearer profile and existing scopes. Delivery remains the bodyless
+`POST /auth/v1/connection-grants/{grant_id}/credential` to the pinned issuer.
+The injected provider client permits only POST to the exact configured HTTPS
+destination: the provider base URL plus `/chat/completions` or `/responses`.
+It is not a general-purpose SaaS client: alternate scheme/host/path, userinfo,
+query and fragment are rejected. For the OpenCode configuration, the destination
+is `https://opencode.ai/inference/go/openai/v1/chat/completions` with the
+server-configured model `minimax-m3.1-flash`, not a caller-selected URL.
+
+API-key execution binds the delivered version and one in-memory snapshot to
+model state. The current candidate revalidates authority through the request's
+credential source on every dispatch, before checking snapshot expiry. Revoked or
+unavailable authority fails closed. Dispatch retains the pinned snapshot: it
+never delivers the key again, substitutes a rotated key or automatically
+refreshes credentials. Published v0.6.0 lacked this per-dispatch authority guard;
+the candidate implements the fix, but its CI acceptance is still pending.
+Delivery does not store keys or human tokens in environment variables,
+Kubernetes Secrets, logs or execution history. There is no automatic refresh,
+new `allow_refresh` feature, connections-write scope expansion or new handoff
+endpoint. Login, browser-bound handoff and reauthorization remain host/BFF
+responsibilities using Goauthy's existing APIs.
+
+External SaaS tools have a separate target path: Conductor HTTP calls through
+Exposure and Grant under the original human's authority. In identity-mode Go
+embedding, a separate Conductor connection goes through `ResolveCredential`;
+the runtime clears `Config.Token` and injects that connection's
+`Credential.HTTPClient`. It does not reuse the model provider credential.
+The host can attach the request-bound human Bearer to this client; Beesuh does
+not automatically extract and forward the ingress Bearer for Conductor.
+
+The existing Conductor client sends `POST /v1/events` and
+`GET /v1/executions/{id}`, adding `X-Beesuh-User-ID`, `X-Beesuh-Workspace-ID` and
+`X-Beesuh-Connection-ID`. These context headers are not authentication proof;
+the gateway must enforce the actual identity and authority. Compatibility of
+these calls with the new Conductor/Exposure/Grant route is unverified and remains
+an integration blocker, not evidence of end-to-end SaaS readiness.
+
+The embedding hook is available, but the published standalone HTTP server
+rejects Conductor configuration and `-conductor-tools`. See
+[shared authorization](shared-http.md) for the existing Grant/Exposure boundary;
+this client alignment adds no API, permission or authority bypass.
+
 ## Goauthy discovery and approved connection selection
 
 Use `goauthy` instead of a per-user `connections` manifest. Only global provider
@@ -146,11 +202,12 @@ The request token remains only in the authenticated request context. Runtime
 authorization and the ready execution resolver revalidate identity and current
 grant approval before admitting execution and obtaining one request-local API-key
 snapshot. An unavailable UserInfo or grant authority fails closed at that boundary.
-The snapshot transport checks the fixed destination and snapshot expiry; it does
-not repeat identity or grant checks on each model dispatch. Revocation after
-admission therefore does not immediately invalidate an already admitted snapshot:
-it may still be used within that request until its expiry. Provider calls already
-in flight cannot be recalled.
+Published v0.6.0's snapshot transport checked the fixed destination and snapshot
+expiry without repeating identity/grant checks per dispatch, so revocation after
+admission could leave that snapshot usable until expiry. The current candidate
+adds request-source authority revalidation before each snapshot expiry check,
+without a second delivery or automatic refresh. Candidate CI is pending.
+Provider calls already in flight cannot be recalled.
 
 There is no user-indexed token cache, refresh-token store or persisted login
 session. Work without the authenticated request context, including after restart,

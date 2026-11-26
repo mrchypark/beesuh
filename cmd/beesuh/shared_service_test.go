@@ -725,3 +725,30 @@ func TestSharedImplicitWorkspaceRequiresExplicitConstantContract(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedGrantURLAllowsLoopbackHTTPOnly(t *testing.T) {
+	for _, tc := range []struct {
+		grantURL string
+		wantOK   bool
+	}{
+		{"https://grant.invalid", true},
+		{"http://127.0.0.1:8093", true},
+		{"http://[::1]:8093", true},
+		{"http://10.0.0.1:8093", false},
+		{"http://grant.invalid", false},
+	} {
+		t.Run(tc.grantURL, func(t *testing.T) {
+			cfg := sharedTestConfig(t)
+			cfg.GrantURL = tc.grantURL
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := &serviceConfig{Shared: data}
+			err = s.configureShared()
+			if (err == nil) != tc.wantOK {
+				t.Fatalf("grant_url=%q err=%v wantOK=%v", tc.grantURL, err, tc.wantOK)
+			}
+		})
+	}
+}

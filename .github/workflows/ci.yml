@@ -128,8 +128,12 @@ jobs:
 
   docker-check:
     needs: release-ref
-    name: docker build and smoke
+    name: docker build and smoke (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,13 +141,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.platform != 'linux/amd64'
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
           load: true
           tags: beesuh:smoke
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=beesuh-build
           cache-to: type=gha,mode=max,scope=beesuh-build
       - name: Container smoke test
@@ -171,6 +177,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-ref.outputs.sha }}
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -182,7 +189,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ghcr.io/mrchypark/beesuh:${{ needs.release-ref.outputs.tag }}
           labels: org.opencontainers.image.source=https://github.com/mrchypark/beesuh
           cache-from: type=gha,scope=beesuh-build
@@ -200,8 +207,10 @@ jobs:
           test "${#PUBLISHED_DIGEST}" -eq 71
           printf '%s\n' "$PUBLISHED_DIGEST" | LC_ALL=C grep -Eq '^sha256:[0-9a-f]{64}$'
           image="ghcr.io/mrchypark/beesuh@$PUBLISHED_DIGEST"
-          docker pull --platform linux/amd64 "$image"
-          sh scripts/smoke-container.sh "$image"
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$image"
+            sh scripts/smoke-container.sh "$image"
+          done
       - name: Preserve failed published-image smoke logs
         if: failure()
         uses: actions/upload-artifact@v4

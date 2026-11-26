@@ -46,8 +46,13 @@ if err != nil { /* handle */ }
 ```
 
 `Authorize`는 실행 시작 전과 queued/background 작업의 tool 실행 전 다시 호출된다.
-따라서 background path는 cookie를 보존할 필요가 없지만, 큐에 넣을 때 검증한
-`Principal`로 `WithPrincipal`을 붙이고 실행 시점의 membership/activity를 재확인해야 한다.
+큐에 넣을 때 검증한 `Principal`은 application-level membership/activity를 다시 확인하는
+데 사용할 수 있다. 다만 Goauthy credential delivery처럼 현재 사람의 authorization이
+필요한 작업은 `Principal`만으로 재개할 수 없다. 이 경우 host는 `PrepareAsync`에서
+restart-safe한 server-side session으로 현재 authority를 다시 구성해야 하며, browser
+bearer나 token을 Beesuh에 저장해서는 안 된다. CLI service mode에는 이런 session이 없어
+async 요청을 503으로 거절한다. shared mode는 owner authorization에 원래 request
+snapshot이 필요해 async 실행을 지원하지 않는다.
 
 service mode data directory는 identity mode로 Rhiza에 pin된다. 기존 operator-mode
 directory를 service mode로 열거나 반대로 여는 것은 거절된다. 기존 데이터에는 소유권을

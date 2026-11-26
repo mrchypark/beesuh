@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,7 @@ import (
 	"github.com/mrchypark/beesuh/model"
 )
 
-func TestDiscoveredConnectionSelectionAndExecution(t *testing.T) {
+func TestDiscoveredConnectionSelectionExecutionAndAsyncFailClosed(t *testing.T) {
 	var deliveries, dispatches atomic.Int32
 	var revoked, wrongOwner, wrongConsumer, wrongGeneration, outage atomic.Bool
 	var version atomic.Int64
@@ -102,6 +103,9 @@ func TestDiscoveredConnectionSelectionAndExecution(t *testing.T) {
 	if e := s.configure(&o); e != nil {
 		t.Fatal(e)
 	}
+	if o.PrepareAsync != nil {
+		t.Fatal("CLI service mode unexpectedly enabled async preparation")
+	}
 	runtime, e := beesuh.Open(context.Background(), o)
 	if e != nil {
 		t.Fatal(e)
@@ -159,6 +163,30 @@ func TestDiscoveredConnectionSelectionAndExecution(t *testing.T) {
 	p, e := s.authenticate(req)
 	if e != nil {
 		t.Fatal(e)
+	}
+	if e = runtime.StartAgentWorker(req.Context()); e != nil {
+		t.Fatal(e)
+	}
+	asyncBody, e := json.Marshal(map[string]any{
+		"workspace_id": p.WorkspaceID, "session_key": "async", "request_id": "async-cli",
+		"connection_id": c.ID, "message": "hello",
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	asyncReq := httptest.NewRequest("POST", "/v1/chat", strings.NewReader(string(asyncBody)))
+	asyncReq.Header.Set("Authorization", "Bearer human")
+	asyncReq.Header.Set("Prefer", "respond-async")
+	asyncOut := httptest.NewRecorder()
+	h.ServeHTTP(asyncOut, asyncReq)
+	if asyncOut.Code != 503 || asyncOut.Header().Get("Preference-Applied") != "" || asyncOut.Header().Get("Location") != "" {
+		t.Fatalf("CLI async = %d %#v %s", asyncOut.Code, asyncOut.Header(), asyncOut.Body.String())
+	}
+	if _, e = runtime.GetRun(beesuh.WithPrincipal(req.Context(), p), p.WorkspaceID, "async-cli"); !errors.Is(e, beesuh.ErrNotFound) {
+		t.Fatalf("CLI async persisted a task: %v", e)
+	}
+	if deliveries.Load() != 0 {
+		t.Fatal("CLI async fetched a Goauthy credential")
 	}
 	refs := discoveryRef{Collection: "models", Connection: "mine", Grant: "approved"}
 	internal := c

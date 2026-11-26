@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,6 +226,109 @@ func TestAPIKeyClientHasNoCachedKeyFallback(t *testing.T) {
 	}
 	if providerCalls.Load() != 1 {
 		t.Fatalf("provider calls = %d", providerCalls.Load())
+	}
+}
+
+func TestCurrentAPIKeySnapshotRechecksAuthorityWithoutRedelivery(t *testing.T) {
+	for _, revoke := range []bool{false, true} {
+		name := "valid-two-dispatches"
+		if revoke {
+			name = "revoked-after-first-dispatch"
+		}
+		t.Run(name, func(t *testing.T) {
+			const human = "snapshot-human-not-for-model"
+			const key = "snapshot-model-key-not-for-source-errors"
+			var deliveries, models, sources atomic.Int32
+			var revoked atomic.Bool
+			var snapshot *apiKeySnapshotTransport
+			expireDuringGuard := false
+			issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				deliveries.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/auth/v1/connection-grants/grant/credential" || r.Header.Get("Authorization") != "Bearer "+human || r.ContentLength > 0 || r.Header.Get("Cookie") != "" {
+					t.Error("snapshot delivery changed the original bodyless human request")
+				}
+				json.NewEncoder(w).Encode(map[string]any{"kind": "api_key", "api_key": key, "grant_id": "grant", "provider_id": "model", "connection_generation": "gen", "credential_version": 7, "connector_digest": "digest", "header": "Authorization", "prefix": "Bearer ", "consent_expires_at_unix_ms": time.Now().Add(time.Minute).UnixMilli()})
+			}))
+			defer issuer.Close()
+			provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				models.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/chat" || r.Header.Get("Authorization") != "Bearer "+key {
+					t.Error("model did not receive only the pinned snapshot credential")
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer provider.Close()
+			source := func(context.Context) (string, error) {
+				sources.Add(1)
+				if expireDuringGuard {
+					snapshot.expires = time.Now().Add(-time.Second).UnixMilli()
+				}
+				if revoked.Load() {
+					return "", errors.Join(auth.ErrForbidden, errors.New(human+" "+key))
+				}
+				return human, nil
+			}
+			binding := APIKeyBinding{GrantID: "grant", ProviderID: "model", ConnectionGeneration: "gen", ConnectorDigest: "digest", Header: "Authorization", Prefix: "Bearer ", Endpoint: provider.URL + "/chat"}
+			client, version, err := ResolveCurrentAPIKey(t.Context(), issuer.URL, binding, source, issuer.Client(), provider.Client())
+			if err != nil || version != 7 || deliveries.Load() != 1 || sources.Load() != 1 {
+				t.Fatalf("initial snapshot: version=%d deliveries=%d sources=%d error=%v", version, deliveries.Load(), sources.Load(), err)
+			}
+			snapshot = client.Transport.(*apiKeySnapshotTransport)
+			dispatch := func(body io.Reader) error {
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, binding.Endpoint, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Authorization", "Bearer "+human)
+				response, err := client.Do(req)
+				if response != nil {
+					response.Body.Close()
+				}
+				return err
+			}
+			if err := dispatch(nil); err != nil || models.Load() != 1 || sources.Load() != 2 {
+				t.Fatalf("first dispatch: models=%d sources=%d error=%v", models.Load(), sources.Load(), err)
+			}
+			revoked.Store(revoke)
+			var body io.Reader
+			var deniedBody *trackingBody
+			if revoke {
+				deniedBody = &trackingBody{Reader: strings.NewReader("must-not-dispatch")}
+				body = deniedBody
+			}
+			err = dispatch(body)
+			wantModels := int32(2)
+			if revoke {
+				wantModels = 1
+				if !errors.Is(err, auth.ErrForbidden) || strings.Contains(err.Error(), human) || strings.Contains(err.Error(), key) {
+					t.Fatalf("revoked source error was not safely denied: %v", err)
+				}
+				if deniedBody.closes != 1 {
+					t.Fatalf("source guard denial body closes=%d want=1", deniedBody.closes)
+				}
+			} else if err != nil {
+				t.Fatalf("valid snapshot reuse: %v", err)
+			}
+			if models.Load() != wantModels || deliveries.Load() != 1 || sources.Load() != 3 {
+				t.Fatalf("models=%d want=%d deliveries=%d want=1 sources=%d want=3", models.Load(), wantModels, deliveries.Load(), sources.Load())
+			}
+			unsafe, err := http.NewRequestWithContext(t.Context(), http.MethodPost, provider.URL+"/other", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Do(unsafe); err == nil || sources.Load() != 3 || models.Load() != wantModels || deliveries.Load() != 1 {
+				t.Fatal("invalid destination reached authority, delivery or model")
+			}
+			if !revoke {
+				if snapshot.expires <= time.Now().UnixMilli() {
+					t.Fatal("snapshot expired before the authority guard")
+				}
+				expireDuringGuard = true
+				if err := dispatch(nil); !errors.Is(err, auth.ErrUnavailable) || sources.Load() != 4 || models.Load() != 2 || deliveries.Load() != 1 {
+					t.Fatalf("expiry after authority guard: sources=%d models=%d deliveries=%d error=%v", sources.Load(), models.Load(), deliveries.Load(), err)
+				}
+			}
+		})
 	}
 }
 

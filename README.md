@@ -19,7 +19,7 @@ Beesuh는 모델 API를 직접 호출하고 대화와 실행 기록을 로컬에
 
 ## 빠르게 시작하기
 
-소스에서 실행하려면 **Go 1.27.3 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
+소스에서 실행하려면 **Go 1.27.4 이상**, Git, 사용할 모델의 API 주소와 모델 ID가
 필요합니다. 메모·스킬 도구를 사용하려면 모델이 tool calling도 지원해야 합니다.
 
 ```sh
@@ -45,14 +45,14 @@ go run ./cmd/beesuh \
 
 ### 기존 Rhiza 데이터의 업그레이드
 
-Beesuh는 [Rhiza v0.23.3](https://github.com/mrchypark/rhiza/releases/tag/v0.23.3)
-(커밋 `fd323dbb37ad86c614eb0983c406adbccd16acba`)으로 버전을 고정합니다.
-CI는 v0.23.0에서 실행·대화 데이터를 만든 프로세스를 SIGKILL로 종료한 뒤,
-v0.23.3으로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
+Beesuh는 [Rhiza v0.27.5](https://github.com/mrchypark/rhiza/releases/tag/v0.27.5)
+(커밋 `97bd7314ed8aa22581d848d46ae96a5f12743575`)으로 버전을 고정합니다.
+CI는 v0.23.3에서 실행·대화 데이터를 만든 프로세스를 SIGKILL로 종료한 뒤,
+v0.27.5로 같은 데이터 디렉터리를 열어 결과를 재사용하고 대화를 이어갈 수
 있는지 검사합니다. 후보 커밋의 검사 결과는 해당 PR에서 확인하세요.
 이전 데이터와 바이너리를 보존하고 복사본으로 검증하세요. 다운그레이드는
 검사 범위에 포함되지 않습니다.
-자세한 범위와 근거는 [v0.23.3 평가](docs/rhiza-0.23.3-assessment.md)를 참고하세요.
+자세한 범위와 근거는 [v0.27.5 평가](docs/rhiza-0.27.5-assessment.md)를 참고하세요.
 다음은 더 오래된 저장 형식에 관한 별도 주의사항입니다.
 v0.21.1 문서가 설명하는 v0.21 계약에서는 모든 Local 아카이브
 형식(파일시스템, S3, GCS, Azure)을 변경하며, 자동 마이그레이션이나 기존 아카이브를
@@ -93,6 +93,9 @@ go run ./cmd/beesuh \
 `-listen`에는 `-service-config`와 `-providers`가 필요하며 backend는 `native`여야 합니다.
 서비스 설정과 자격증명이 없는 provider 설정은
 [OAuth2/OIDC 서비스 설정](docs/http-service-adapter.md)을 참고하세요.
+The linked guide also distinguishes Beesuh's local Goauthy delivery and injected
+HTTP clients from an official SDK, and separates model execution from the
+Conductor/Exposure/Grant SaaS integration target.
 
 For the shared organization/workspace profile, see
 [shared HTTP configuration and UI routes](docs/shared-http.md). It keeps the

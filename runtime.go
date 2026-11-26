@@ -64,8 +64,11 @@ type Options struct {
 	RevokeCredential  func(context.Context, Connection) error
 	RevocationTimeout time.Duration
 	// RequireIdentity enables service-owned user isolation; Authorize checks current membership/activity.
-	RequireIdentity           bool
-	Authorize                 func(context.Context, Principal) error
+	RequireIdentity bool
+	Authorize       func(context.Context, Principal) error
+	// PrepareAsync reconstructs host-private execution authority from a stored
+	// Principal. The returned context is never persisted.
+	PrepareAsync              func(context.Context, Principal) (context.Context, error)
 	Native                    *NativeOptions
 	DataDir, BackendID        string
 	OpenCode                  opencode.Config
@@ -132,8 +135,14 @@ type Runtime struct {
 	locks    map[string]*sessionLock
 	capacity CapacityLimits
 	// cancelMu never acquires a request/session lock held across execution.
-	cancelMu sync.Mutex
-	controls map[string]map[*runControl]struct{}
+	cancelMu      sync.Mutex
+	controls      map[string]map[*runControl]struct{}
+	workerMu      sync.Mutex
+	workerClosing bool
+	workerCtx     context.Context
+	workerCancel  context.CancelFunc
+	workerDone    chan struct{}
+	agentWake     chan struct{}
 }
 
 // runtimeDB keeps production on Rhiza while allowing deterministic storage
@@ -219,7 +228,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock), capacity: opts.Capacity}
+	r := &Runtime{db: db, client: client, native: native, opts: opts, file: f, slots: make(chan struct{}, opts.MaxConcurrent), admission: make(chan struct{}, opts.MaxConcurrent+opts.MaxWaiting), locks: make(map[string]*sessionLock), capacity: opts.Capacity, agentWake: make(chan struct{}, 1)}
 	r.profile = digest(opts.Permissions)
 	if native != nil {
 		r.profile = native.profile
@@ -227,7 +236,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 	err = db.Migrate(ctx, []rhiza.Migration{{Version: 1, Name: "sessions-and-runs", Statements: []rhiza.SQLStatement{
 		{SQL: `CREATE TABLE sessions (workspace TEXT NOT NULL, session_key TEXT NOT NULL, backend TEXT NOT NULL, directory TEXT NOT NULL, profile TEXT NOT NULL, session_id TEXT NOT NULL, active_request TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,session_key))`},
 		{SQL: `CREATE TABLE runs (workspace TEXT NOT NULL, request_id TEXT NOT NULL, session_key TEXT NOT NULL, input_hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', PRIMARY KEY(workspace,request_id))`},
-	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration, cancellationMigration, organizationMigration})
+	}}, nativeMigration, connectionMigration, identityMigration, connectionCredentialMigration, workspaceUncertaintyMigration, retentionMigration, connectionRevocationMigration, runsHistoryIndexMigration, pendingCreateMigration, connectionRevocationBackfillMigration, capacityMigration, cancellationMigration, organizationMigration, agentTasksMigration})
 	if err == nil {
 		err = r.pinIdentityMode(ctx)
 	}
@@ -280,6 +289,7 @@ func Open(ctx context.Context, opts Options) (*Runtime, error) {
 }
 
 func (r *Runtime) Close() error {
+	r.stopAgentWorker()
 	r.life.Lock()
 	defer r.life.Unlock()
 	r.cancelMu.Lock()
@@ -302,29 +312,12 @@ func (r *Runtime) Run(ctx context.Context, req Request) (result Result, resultEr
 	if r.closed {
 		return Result{}, ErrClosed
 	}
-	if err := r.bindRequest(ctx, &req); err != nil {
-		return Result{}, err
-	}
-	if req.Prompt.Model == nil {
-		req.Prompt.Model = r.opts.Model
-	}
-	if r.native != nil {
-		if r.native.named && req.Provider == "" {
-			req.Provider = r.native.opts.DefaultProvider
-		}
-		if err := r.native.validate(req); err != nil {
-			return Result{}, errors.Join(ErrInvalidInput, err)
-		}
-	}
-	if r.native == nil && req.Provider != "" {
-		return Result{}, errors.Join(ErrInvalidInput, errors.New("beesuh: named providers require native backend"))
-	}
-	if err := validateRequest(req); err != nil {
-		return Result{}, errors.Join(ErrInvalidInput, err)
-	}
-	schema, err := compileSchema(req.Prompt.Schema)
+	var schema *jsonschema.Schema
+	var hash string
+	var err error
+	req, schema, hash, err = r.prepareRun(ctx, req)
 	if err != nil {
-		return Result{}, errors.Join(ErrInvalidInput, err)
+		return Result{}, err
 	}
 	timeout := r.opts.Timeout
 	if req.Timeout > 0 && req.Timeout < timeout {
@@ -357,7 +350,6 @@ func (r *Runtime) Run(ctx context.Context, req Request) (result Result, resultEr
 		return Result{}, err
 	}
 	defer unlock()
-	hash := digest(req)
 	if out, found, err := r.previous(ctx, req, hash); found || err != nil {
 		return out, err
 	}
@@ -493,8 +485,14 @@ func (r *Runtime) legacyMayHaveEffects() bool {
 
 func (r *Runtime) previous(ctx context.Context, req Request, hash string) (Result, bool, error) {
 	rows, err := r.query(ctx, `SELECT input_hash,state,result FROM runs WHERE workspace=? AND request_id=?`, req.WorkspaceID, req.RequestID)
-	if err != nil || len(rows) == 0 {
+	if err != nil {
 		return Result{}, false, err
+	}
+	if len(rows) == 0 && !isAgentTaskWorker(ctx) {
+		return r.previousAgentTask(ctx, req, hash)
+	}
+	if len(rows) == 0 {
+		return Result{}, false, nil
 	}
 	if rows[0][0] != hash {
 		return Result{}, true, ErrConflict
@@ -510,6 +508,34 @@ func (r *Runtime) previous(ctx context.Context, req Request, hash string) (Resul
 		return out, true, replayFailure(out.FailureCategory, out.Error)
 	}
 	return out, true, nil
+}
+
+func (r *Runtime) prepareRun(ctx context.Context, req Request) (Request, *jsonschema.Schema, string, error) {
+	if err := r.bindRequest(ctx, &req); err != nil {
+		return Request{}, nil, "", err
+	}
+	if req.Prompt.Model == nil {
+		req.Prompt.Model = r.opts.Model
+	}
+	if r.native != nil {
+		if r.native.named && req.Provider == "" {
+			req.Provider = r.native.opts.DefaultProvider
+		}
+		if err := r.native.validate(req); err != nil {
+			return Request{}, nil, "", errors.Join(ErrInvalidInput, err)
+		}
+	}
+	if r.native == nil && req.Provider != "" {
+		return Request{}, nil, "", errors.Join(ErrInvalidInput, errors.New("beesuh: named providers require native backend"))
+	}
+	if err := validateRequest(req); err != nil {
+		return Request{}, nil, "", errors.Join(ErrInvalidInput, err)
+	}
+	schema, err := compileSchema(req.Prompt.Schema)
+	if err != nil {
+		return Request{}, nil, "", errors.Join(ErrInvalidInput, err)
+	}
+	return req, schema, digest(req), nil
 }
 
 func (r *Runtime) session(ctx context.Context, req Request) (string, error) {

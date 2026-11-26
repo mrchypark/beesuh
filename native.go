@@ -655,6 +655,13 @@ func (r *Runtime) GetRun(ctx context.Context, workspace, request string) (Result
 		if requested {
 			return cancelledResult(request), nil
 		}
+		task, found, err := r.agentTask(ctx, workspace, request)
+		if err != nil {
+			return Result{}, err
+		}
+		if found {
+			return agentTaskResult(request, task.state, task.failureCategory), nil
+		}
 		return Result{}, ErrNotFound
 	}
 	if rows[0][0] == "running" {

@@ -217,6 +217,9 @@ func run() (err error) {
 	}
 	defer closeWithError(&err, runtime.Close)
 	if *listen != "" {
+		if err := runtime.StartAgentWorker(ctx); err != nil {
+			return err
+		}
 		handler, err := httpapi.NewAuthenticated(runtime, service.authenticate)
 		if err != nil {
 			return err

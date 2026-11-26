@@ -299,14 +299,14 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				"canonicalQueryDigest": fixtureDigest(nil), "forwardedHeaderDigest": "sha256:d9500b9751dc32207195b57b1f21d7a7343beaca1e40931d9487ab0a165caadc", "method": "POST",
 				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContractDigest("run_execute"),
 				"pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider", "providerCredentialDigest": fixtureCredentialDigest("Bearer smoke-access-token"),
-				"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience},
+				"providerCredential": map[string]string{"subject": "goauthy:" + issuer + "/smoke-user", "audience": grantHintAudience},
 				"resourceId":         sharedWorkspace, "resourceType": "workspace", "resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": "constant", "name": ""},
 				"requestBinding": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 24)),
 			}
 			switch mutate {
 			case "valid", "original-bearer":
 			case "hint":
-				wire["providerCredential"] = map[string]string{"subject": "smoke-user", "audience": serviceAudience}
+				wire["providerCredential"] = map[string]string{"subject": "goauthy:" + issuer + "/smoke-user", "audience": serviceAudience}
 			case "unsupported-header-kind":
 				wire["resourceEvidence"] = map[string]string{"canonicalValue": sharedWorkspace, "kind": "header", "name": "x-workspace-id"}
 			case "wrong-resource":
@@ -314,7 +314,7 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				wire["resourceEvidence"] = map[string]string{"canonicalValue": "another-workspace", "kind": "constant", "name": ""}
 			case "nonmember":
 				policy.expected.Token = "smoke-nonmember-token"
-				wire["providerCredential"] = map[string]string{"subject": "nonmember-user", "audience": grantHintAudience}
+				wire["providerCredential"] = map[string]string{"subject": "goauthy:" + issuer + "/nonmember-user", "audience": grantHintAudience}
 				wire["providerCredentialDigest"] = fixtureCredentialDigest("Bearer smoke-nonmember-token")
 			default:
 				wire[mutate] = "wrong"

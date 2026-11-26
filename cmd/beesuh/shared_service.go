@@ -125,7 +125,7 @@ func (s *serviceConfig) configureShared() error {
 	}
 	bad := func() error { return errors.New("invalid shared service configuration") }
 	var cfg *sharedServiceConfig
-	if decodeServiceJSON(bytes.NewReader(s.Shared), 1<<20, &cfg) != nil || cfg == nil || !validServiceText(cfg.GrantCredentialHintAudience) || !utf8.ValidString(cfg.GrantCredentialHintAudience) || len(cfg.Contexts) == 0 || len(cfg.Contexts) > 128 {
+	if decodeServiceJSON(bytes.NewReader(s.Shared), 1<<20, &cfg) != nil || cfg == nil || !secureEndpoint(cfg.GrantURL) || !validServiceText(cfg.GrantCredentialHintAudience) || !utf8.ValidString(cfg.GrantCredentialHintAudience) || len(cfg.Contexts) == 0 || len(cfg.Contexts) > 128 {
 		return bad()
 	}
 	prepared := &sharedService{bindings: make(map[sharedBindingKey]*sharedContext), hintAudience: cfg.GrantCredentialHintAudience}
@@ -142,7 +142,7 @@ func (s *serviceConfig) configureShared() error {
 		if _, exists := prepared.bindings[key]; exists {
 			return bad()
 		}
-		c := grantpolicy.Config{BaseURL: cfg.GrantURL, AppKeyFile: cfg.AppKeyFile, OrganizationID: binding.OrganizationID, ProviderID: binding.ProviderID, PEPClientID: binding.PEPClientID, CatalogGeneration: binding.CatalogGeneration, CatalogDigest: binding.CatalogDigest, Operations: make(map[string]grantpolicy.Binding)}
+		c := grantpolicy.Config{BaseURL: cfg.GrantURL, AllowPrivateHTTP: true, AppKeyFile: cfg.AppKeyFile, OrganizationID: binding.OrganizationID, ProviderID: binding.ProviderID, PEPClientID: binding.PEPClientID, CatalogGeneration: binding.CatalogGeneration, CatalogDigest: binding.CatalogDigest, Operations: make(map[string]grantpolicy.Binding)}
 		headers := make(map[string][]string)
 		for _, route := range sharedRoutes() {
 			pin, ok := binding.Operations[route.operation]

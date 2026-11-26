@@ -392,7 +392,7 @@ func (s *serviceConfig) authorizeShared(ctx context.Context, p, human beesuh.Pri
 	if _, enabled := binding.operations[snapshot.operation]; !enabled {
 		return beesuh.ErrForbidden
 	}
-	credential := grantpolicy.Credential{Authorization: snapshot.authorization, Subject: claims.Subject, Audience: s.shared.hintAudience}
+	credential := grantpolicy.Credential{Authorization: snapshot.authorization, Subject: "goauthy:" + s.Issuer + "/" + claims.Subject, Audience: s.shared.hintAudience}
 	if err := snapshot.policy.Check(ctx, snapshot.operation, snapshot.actual, credential); err != nil {
 		return beesuh.ErrForbidden
 	}

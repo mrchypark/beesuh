@@ -436,11 +436,11 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"canonicalQuery": query, "canonicalQueryDigest": fixtureDigest([]byte(query)), "forwardedHeaderDigest": headerDigest,
 		"capabilityId": "bee." + operation, "capabilityVersion": 1, "catalogDigest": fixtureCatalog, "catalogGeneration": 1,
 		"contractDigest": fixtureContractDigest(operation), "method": expected.Method, "pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider",
-		"providerCredential": map[string]string{"subject": "smoke-user", "audience": grantHintAudience}, "providerCredentialDigest": fixtureCredentialDigest(credential),
+		"providerCredential": map[string]string{"subject": "goauthy:" + issuer + "/smoke-user", "audience": grantHintAudience}, "providerCredentialDigest": fixtureCredentialDigest(credential),
 		"resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": fixtureEvidenceKind, "name": ""}, "resourceId": sharedWorkspace, "resourceType": "workspace",
 	}
 	if expected.Token == "smoke-nonmember-token" {
-		values["providerCredential"] = map[string]string{"subject": "nonmember-user", "audience": grantHintAudience}
+		values["providerCredential"] = map[string]string{"subject": "goauthy:" + issuer + "/nonmember-user", "audience": grantHintAudience}
 	}
 	valid := validContentType && p.fetched && operation != "" && r.Method == "POST" && r.URL.Path == "/api/v2/http-capabilities/decide" && len(r.Header.Values("Authorization")) == 1 && r.Header.Get("Authorization") == credential && len(r.Header.Values("X-Organization-ID")) == 1 && r.Header.Get("X-Organization-ID") == sharedOrganization && len(r.Header.Values("X-Grant-App-Auth-Key")) == 1 && r.Header.Get("X-Grant-App-Auth-Key") == fixtureAppKey && len(request) == len(values)+1
 	p.fetched = false
@@ -485,7 +485,7 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	delete(values, "resourceEvidence")
 	delete(values, "providerCredential")
 	values["requestBinding"], values["allowed"], values["reason"] = nonce, true, "fixture_only_allow"
-	values["actionId"], values["providerSubject"], values["providerAudience"] = fixtureAction(operation), "smoke-user", grantHintAudience
+	values["actionId"], values["providerSubject"], values["providerAudience"] = fixtureAction(operation), "goauthy:"+issuer+"/smoke-user", grantHintAudience
 	values["principalDigest"] = strings.TrimPrefix(fixtureDigest([]byte("fixture-principal:smoke-user")), "sha256:")
 	now := time.Now().UTC()
 	values["issuedAt"], values["expiresAt"] = now, now.Add(3*time.Second)

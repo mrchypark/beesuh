@@ -182,7 +182,7 @@ func TestSharedServiceSnapshotIsImmutableAndRechecks(t *testing.T) {
 	if initial.actual.ForwardedHeaderDigest != "sha256:787da76e548aa96cf8897406353227899e0d1d455289cd6a313002c995ef8f57" {
 		t.Fatalf("snapshot did not bind exact selector header bytes: %s", initial.actual.ForwardedHeaderDigest)
 	}
-	if initial.actual.BodyDigest != grantpolicy.Digest([]byte(body)) || initial.actual.BodyLength != int64(len(body)) || initial.credential.Subject != "user" || initial.credential.Audience != s.shared.hintAudience || initial.credential.Authorization != "Bearer opaque-human-token" {
+	if initial.actual.BodyDigest != grantpolicy.Digest([]byte(body)) || initial.actual.BodyLength != int64(len(body)) || initial.credential.Subject != "goauthy:"+s.Issuer+"/user" || initial.credential.Audience != s.shared.hintAudience || initial.credential.Authorization != "Bearer opaque-human-token" {
 		t.Fatalf("incorrect snapshot: %+v", initial)
 	}
 	req.Method = "DELETE"

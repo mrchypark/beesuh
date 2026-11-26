@@ -300,7 +300,7 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				"capabilityId": "bee.run_execute", "capabilityVersion": 1, "catalogGeneration": 1, "catalogDigest": fixtureCatalog, "contractDigest": fixtureContractDigest("run_execute"),
 				"pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider", "providerCredentialDigest": fixtureCredentialDigest("Bearer smoke-access-token"),
 				"providerCredential": map[string]string{"subject": "goauthy:" + issuer + "/smoke-user", "audience": grantHintAudience},
-				"resourceId":         sharedWorkspace, "resourceType": "workspace", "resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": "constant", "name": ""},
+				"resourceId":         sharedWorkspace, "resourceType": "workspace", "resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": "constant"},
 				"requestBinding": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 24)),
 			}
 			switch mutate {
@@ -311,7 +311,7 @@ func TestFixturePDPRejectsUnboundSnapshots(t *testing.T) {
 				wire["resourceEvidence"] = map[string]string{"canonicalValue": sharedWorkspace, "kind": "header", "name": "x-workspace-id"}
 			case "wrong-resource":
 				wire["resourceId"] = "another-workspace"
-				wire["resourceEvidence"] = map[string]string{"canonicalValue": "another-workspace", "kind": "constant", "name": ""}
+				wire["resourceEvidence"] = map[string]string{"canonicalValue": "another-workspace", "kind": "constant"}
 			case "nonmember":
 				policy.expected.Token = "smoke-nonmember-token"
 				wire["providerCredential"] = map[string]string{"subject": "goauthy:" + issuer + "/nonmember-user", "audience": grantHintAudience}

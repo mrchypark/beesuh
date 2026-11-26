@@ -47,7 +47,7 @@ type Config struct {
 type ResourceEvidence struct {
 	CanonicalValue string `json:"canonicalValue"`
 	Kind           string `json:"kind"`
-	Name           string `json:"name"`
+	Name           string `json:"name,omitempty"`
 }
 type ActualSnapshot struct {
 	Method                string `json:"method"`

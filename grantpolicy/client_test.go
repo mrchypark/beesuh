@@ -712,6 +712,17 @@ func TestConstantEvidence(t *testing.T) {
 		t.Fatal("registered constant with empty name: ", err)
 	}
 	t.Cleanup(client.http.CloseIdleConnections)
+	raw, err := json.Marshal(b.ResourceEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := decoded["name"]; present {
+		t.Fatalf("constant resourceEvidence must omit empty name, got %s", raw)
+	}
 	b.ResourceEvidence.Kind = "pathSegment"
 	cfg.Operations = map[string]Binding{"read": b}
 	if _, err := New(cfg); err == nil {

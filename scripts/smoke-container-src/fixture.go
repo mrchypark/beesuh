@@ -437,7 +437,7 @@ func (p *fixturePolicy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"capabilityId": "bee." + operation, "capabilityVersion": 1, "catalogDigest": fixtureCatalog, "catalogGeneration": 1,
 		"contractDigest": fixtureContractDigest(operation), "method": expected.Method, "pepClientId": "bee-smoke-pep", "providerId": "bee-smoke-provider",
 		"providerCredential": map[string]string{"subject": "goauthy:" + issuer + "/smoke-user", "audience": grantHintAudience}, "providerCredentialDigest": fixtureCredentialDigest(credential),
-		"resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": fixtureEvidenceKind, "name": ""}, "resourceId": sharedWorkspace, "resourceType": "workspace",
+		"resourceEvidence": map[string]string{"canonicalValue": sharedWorkspace, "kind": fixtureEvidenceKind}, "resourceId": sharedWorkspace, "resourceType": "workspace",
 	}
 	if expected.Token == "smoke-nonmember-token" {
 		values["providerCredential"] = map[string]string{"subject": "goauthy:" + issuer + "/nonmember-user", "audience": grantHintAudience}
